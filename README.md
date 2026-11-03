@@ -39,6 +39,7 @@ python -m unittest Test_file -v
   - Insurance: covers 20% of the consultation fee and 50% of test charges
   - Senior discount: 10% off the post-insurance amount for patients aged 60+
 - **Appointment processing** – approves or rejects appointments and blocks duplicate/cancelled ones.
+  - Only completed appointments are billed; pending ones are rejected until completed.
 - **Cancellation** – only `pending` appointments can be cancelled.
 - **Reports** – per-doctor, per-patient, and clinic dashboard (revenue, top doctor, most requested doctor, insured/senior counts, etc.).
 - **Utilities** – `combine_bills(*bills)`, `search_patients(**criteria)`, `calculate_bill_kwargs(...)`.

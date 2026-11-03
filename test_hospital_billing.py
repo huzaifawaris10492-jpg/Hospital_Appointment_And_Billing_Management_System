@@ -1,8 +1,8 @@
 import copy
 import unittest
 
-import Appointment_and_Bolling_system as hms
-from Appointment_and_Bolling_system import (
+import Appointment_and_Billing_system as hms
+from Appointment_and_Billing_system import (
     CLINIC_CONFIG,
     calculate_bill,
     calculate_bill_kwargs,
@@ -20,6 +20,7 @@ from Appointment_and_Bolling_system import (
     search_patients,
     validate_appointment,
     validate_doctors,
+    validate_patients,
     validate_test_prices,
 )
 
@@ -162,6 +163,29 @@ class TestValidateConfigData(BaseTestCase):
         with self.assertRaises(ValueError):
             validate_test_prices(["ECG"])
 
+class TestValidatePatients(BaseTestCase):
+
+    def test_valid_patients(self):
+        validate_patients(hms.patients)  # should not raise
+
+    def test_not_dict(self):
+        with self.assertRaises(ValueError):
+            validate_patients([])
+
+    def test_missing_name(self):
+        bad = {"P1": {"age": 30, "city": "X", "insurance": True}}
+        with self.assertRaises(ValueError):
+            validate_patients(bad)
+
+    def test_negative_age(self):
+        bad = {"P1": {"name": "A", "age": -1, "city": "X", "insurance": True}}
+        with self.assertRaises(ValueError):
+            validate_patients(bad)
+
+    def test_insurance_not_bool(self):
+        bad = {"P1": {"name": "A", "age": 30, "city": "X", "insurance": "yes"}}
+        with self.assertRaises(ValueError):
+            validate_patients(bad)
 
 class TestBilling(BaseTestCase):
 
@@ -206,7 +230,6 @@ class TestBilling(BaseTestCase):
         self.assertEqual(calculate_bill(5000, 0, False, 60)["senior_discount"], 500)
 
     def test_bill_insurance_and_senior(self):
-        # 5000 + 2500 = 7500; coverage 2250 -> 5250; 10% senior = 525 -> 4725
         bill = calculate_bill(5000, 2500, True, 70)
         self.assertEqual(bill["final_amount"], 4725)
 
@@ -214,6 +237,11 @@ class TestBilling(BaseTestCase):
         self.assertEqual(get_senior_threshold(), CLINIC_CONFIG["senior_age_threshold"])
         self.assertEqual(get_senior_threshold(), 60)
 
+    def test_bill_rounded_to_two_decimals(self):
+        bill = calculate_bill(3333, 0, True, 67)
+        self.assertEqual(bill["consultation_coverage"], 666.6)
+        self.assertEqual(bill["senior_discount"], 266.64)
+        self.assertEqual(bill["final_amount"], 2399.76)
 
 class TestCalculateBillKwargs(BaseTestCase):
 
@@ -302,8 +330,38 @@ class TestProcessAppointment(BaseTestCase):
         results = process_all_appointments(appts)
         self.assertEqual(results[0]["status"], "APPROVED")
         self.assertEqual(results[1]["status"], "REJECTED")
+    
+    def test_pending_appointment_not_billed(self):
+        result = process_appointment(make_appt(status="pending", tests=["MRI"]))
+        self.assertEqual(result["status"], "REJECTED")
+        self.assertIn("Pending", result["reason"])
+        
+    def test_missing_appointment_id_rejected(self):
+        appt = make_appt(status="completed")
+        del appt["appointment_id"]
+        self.assertEqual(process_appointment(appt)["status"], "REJECTED")
 
+    def test_blank_appointment_id_rejected(self):
+        result = process_appointment(make_appt(appointment_id="   ", status="completed"))
+        self.assertEqual(result["status"], "REJECTED")
 
+    def test_ids_compared_case_and_space_insensitive(self):
+        processed = set()
+        first = process_appointment(make_appt(appointment_id="A1", status="completed"), processed)
+        second = process_appointment(make_appt(appointment_id=" a1 ", status="completed"), processed)
+        self.assertEqual(first["status"], "APPROVED")
+        self.assertEqual(second["status"], "REJECTED")
+        
+    def test_process_with_custom_data(self):
+        pts = {"X1": {"name": "Z", "age": 70, "city": "C", "insurance": False}}
+        docs = {"Q1": {"name": "Dr Q", "specialization": "S", "fee": 1000, "available": True}}
+        prices = {"ECG": 100}
+        appt = make_appt(appointment_id="1", patient_id="X1", doctor_id="Q1",
+                         status="completed", tests=["ECG"])
+        result = process_appointment(appt, None, pts, docs, prices)
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertEqual(result["bill"]["final_amount"], 990)
+    
 class TestCancelAppointment(BaseTestCase):
 
     def test_cancel_pending(self):
@@ -394,7 +452,7 @@ class TestReports(BaseTestCase):
         self.assertEqual(dash["pending"], 0)
         self.assertEqual(dash["total_revenue"], 13100)
         self.assertEqual(dash["top_doctor"], ["Dr. Hassan"])
-        self.assertEqual(dash["most_requested_doctor"], "Dr. Hassan")
+        self.assertEqual(dash["most_requested_doctor"], ["Dr. Hassan"])
         self.assertEqual(dash["insured_patient_count"], 2)
         self.assertEqual(dash["senior_patient_count"], 1)
         self.assertEqual(dash["highest_spending_patient"], ["Usman Ali"])
@@ -405,7 +463,14 @@ class TestReports(BaseTestCase):
         self.assertEqual(dash["total_appointments"], 0)
         self.assertEqual(dash["total_revenue"], 0)
         self.assertEqual(dash["completed"], 0)
-
+        self.assertEqual(dash["most_requested_doctor"], [])
+    
+    def test_most_requested_doctor_tie_returns_all(self):
+        appts = [make_appt("T1", doctor_id="D001", status="completed"),
+                 make_appt("T2", doctor_id="D002", status="completed")]
+        results = process_all_appointments(appts)
+        dash = generate_clinic_report(appts, results)
+        self.assertEqual(dash["most_requested_doctor"], ["Dr. Hassan", "Dr. Sara"])
 
 class TestArgsKwargs(BaseTestCase):
 
@@ -429,6 +494,9 @@ class TestArgsKwargs(BaseTestCase):
     def test_search_no_criteria_returns_all(self):
         self.assertEqual(len(search_patients()), len(hms.patients))
 
+    def test_search_unknown_field_raises(self):
+        with self.assertRaises(ValueError):
+            search_patients(cty="Lahore")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
