@@ -6,8 +6,9 @@ A Python appointment and billing system for a small clinic. It validates appoint
 
 ```
 Hospital Management System/
-├── Appointment_and_Bolling_system.py   # Main application code
-├── Test_file.py                        # Unit tests (unittest)
+├── Appointment_and_Billing_system.py   # Main application code
+├── test_hospital_billing.py            # Unit tests (unittest)
+├── .gitignore
 └── README.md
 ```
 
@@ -19,34 +20,37 @@ Hospital Management System/
 ## Run the Program
 
 ```bash
-python Appointment_and_Bolling_system.py
+python Appointment_and_Billing_system.py
 ```
 
-This processes the sample appointments and prints the billing results, a cancellation test, the doctor/patient reports, and the clinic dashboard.
+This processes the sample appointments and prints the billing results, a cancellation test, the doctor/patient reports, the clinic dashboard, and a demo of the utility functions.
 
 ## Run the Tests
 
 From the project folder:
 
 ```bash
-python -m unittest Test_file -v
+python -m unittest -v
 ```
 
 ## Features
 
-- **Appointment validation** – checks patient, doctor, doctor availability, status, tests, duplicate tests, and patient age.
+- **Appointment validation** – checks patient, doctor, doctor availability, status, tests, duplicate tests, and patient age and insurance. Malformed appointments are rejected with a clear reason instead of crashing.
 - **Billing** – consultation fee + test charges, with:
   - Insurance: covers 20% of the consultation fee and 50% of test charges
   - Senior discount: 10% off the post-insurance amount for patients aged 60+
-- **Appointment processing** – approves or rejects appointments and blocks duplicate/cancelled ones.
-  - Only completed appointments are billed; pending ones are rejected until completed.
+  - All rates are read from `CLINIC_CONFIG`; money is calculated with `Decimal` and rounded to 2 decimals
+- **Appointment processing** – approves or rejects appointments and blocks duplicate and cancelled ones.
+  - Only `completed` appointments are billed; `pending` ones are rejected until completed.
+  - Appointment, patient, and doctor IDs are trimmed and upper-cased before matching (`" a1 "` equals `"A1"`).
 - **Cancellation** – only `pending` appointments can be cancelled.
-- **Reports** – per-doctor, per-patient, and clinic dashboard (revenue, top doctor, most requested doctor, insured/senior counts, etc.).
-- **Utilities** – `combine_bills(*bills)`, `search_patients(**criteria)`, `calculate_bill_kwargs(...)`.
+- **Reports** – per-doctor, per-patient, and clinic dashboard (revenue, top doctor, most requested doctor, insured/senior counts, etc.). Report inputs are validated.
+- **Data validation** – `validate_patients`, `validate_doctors`, `validate_test_prices`, and `validate_clinic_config` check the reference data and rates.
+- **Utilities** – `combine_bills(*bills)`, `search_patients(**criteria)` (unknown fields raise `ValueError`), `calculate_bill_kwargs(...)`.
 
 ## Configuration
 
-Rates are set in `CLINIC_CONFIG`:
+Rates are set in `CLINIC_CONFIG` (rates must be between 0 and 1):
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -60,8 +64,9 @@ Rates are set in `CLINIC_CONFIG`:
 | Function | Purpose |
 |---|---|
 | `validate_appointment(appointment)` | Returns `(is_valid, reason)` |
-| `calculate_bill(fee, test_charges, has_insurance, age)` | Returns a full bill breakdown dict |
+| `calculate_bill(fee, test_charges, has_insurance, age)` | Returns a full bill breakdown dict (`Decimal` values) |
 | `process_appointment(appointment, processed_ids)` | Returns an `APPROVED` or `REJECTED` result |
+| `process_all_appointments(appointments)` | Processes a list and blocks duplicate IDs |
 | `cancel_appointment(appointment)` | Returns `(success, message)` |
 | `generate_doctor_report(doctor_id, appointments, results)` | Doctor stats and revenue |
 | `generate_patient_report(patient_id, appointments, results)` | Patient spending and savings |
@@ -75,8 +80,14 @@ Insured patient, consultation 5000 + tests 2500:
 - Insurance coverage: 1000 + 1250 = 2250
 - Patient pays: **5250**
 
+## Error Handling
+
+- Appointment problems (unknown patient or doctor, bad tests, pending status, missing ID) return a `REJECTED` result with a `reason`.
+- Invalid data passed to billing, validation, or report functions raises `ValueError`.
+- `calculate_bill_kwargs` returns `(None, error_message)` instead of raising.
+
 ## Sample Data
 
 - Patients: `P001`–`P004`
 - Doctors: `D001` (Cardiology), `D002` (Dermatology), `D003` (General)
-- Tests: ECG, Blood Test, X-Ray, MRI# Hospital_Appointment_And_Billing_Management_System
+- Tests: ECG, Blood Test, X-Ray, MRI

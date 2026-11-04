@@ -1,5 +1,6 @@
 import copy
 import unittest
+from decimal import Decimal
 
 import Appointment_and_Billing_system as hms
 from Appointment_and_Billing_system import (
@@ -8,13 +9,11 @@ from Appointment_and_Billing_system import (
     calculate_bill_kwargs,
     calculate_insurance_coverage,
     calculate_test_charges,
-    calculate_total,
     cancel_appointment,
     combine_bills,
     generate_clinic_report,
     generate_doctor_report,
     generate_patient_report,
-    get_senior_threshold,
     process_all_appointments,
     process_appointment,
     search_patients,
@@ -49,7 +48,6 @@ def patient_report_of(patient_id, appts, results):
 
 
 class BaseTestCase(unittest.TestCase):
-    """Snapshots the module-level data before each test and restores it after."""
 
     def setUp(self):
         self._backup = {
@@ -82,6 +80,18 @@ class TestValidateAppointment(BaseTestCase):
         ok, reason = validate_appointment(make_appt(patient_id="P999"))
         self.assertFalse(ok)
         self.assertIn("P999", reason)
+        
+    def test_doctor_record_not_a_dict(self):
+        hms.doctors["D001"] = "bad"  # type: ignore
+        ok, reason = validate_appointment(make_appt())
+        self.assertFalse(ok)
+        self.assertIn("D001", reason)
+
+    def test_doctor_missing_fee(self):
+        del hms.doctors["D001"]["fee"]
+        ok, reason = validate_appointment(make_appt())
+        self.assertFalse(ok)
+        self.assertIn("fee", reason)
 
     def test_invalid_doctor_id(self):
         ok, reason = validate_appointment(make_appt(doctor_id="D999"))
@@ -122,6 +132,33 @@ class TestValidateAppointment(BaseTestCase):
         ok, _ = validate_appointment(make_appt())
         self.assertFalse(ok)
 
+    def test_patient_record_not_a_dict(self):
+        hms.patients["P001"] = "bad"  # type: ignore
+        ok, reason = validate_appointment(make_appt())
+        self.assertFalse(ok)
+        self.assertIn("P001", reason)
+
+    def test_patient_missing_age(self):
+        del hms.patients["P001"]["age"]
+        ok, reason = validate_appointment(make_appt())
+        self.assertFalse(ok)
+        self.assertIn("age", reason)
+
+    def test_patient_missing_insurance(self):
+        del hms.patients["P001"]["insurance"]
+        ok, reason = validate_appointment(make_appt())
+        self.assertFalse(ok)
+        self.assertIn("insurance", reason)
+
+    def test_patient_insurance_not_bool(self):
+        hms.patients["P001"]["insurance"] = "yes"
+        ok, _ = validate_appointment(make_appt())
+        self.assertFalse(ok)
+
+    def test_nan_age_rejected(self):
+        hms.patients["P001"]["age"] = float("nan")
+        ok, _ = validate_appointment(make_appt())
+        self.assertFalse(ok)
 
 class TestValidateConfigData(BaseTestCase):
 
@@ -162,6 +199,37 @@ class TestValidateConfigData(BaseTestCase):
     def test_validate_test_prices_not_dict(self):
         with self.assertRaises(ValueError):
             validate_test_prices(["ECG"])
+    
+    def test_validate_doctors_empty_name(self):
+        bad = {"D1": {"name": "  ", "specialization": "B", "fee": 10, "available": True}}
+        with self.assertRaises(ValueError):
+            validate_doctors(bad)
+
+    def test_validate_doctors_bad_key(self):
+        bad = {1: {"name": "A", "specialization": "B", "fee": 10, "available": True}}
+        with self.assertRaises(ValueError):
+            validate_doctors(bad)  # type: ignore
+
+    def test_validate_doctors_nan_fee(self):
+        bad = {"D1": {"name": "A", "specialization": "B", "fee": float("nan"), "available": True}}
+        with self.assertRaises(ValueError):
+            validate_doctors(bad)
+
+    def test_validate_test_prices_empty_name(self):
+        with self.assertRaises(ValueError):
+            validate_test_prices({"": 100})
+
+    def test_validate_test_prices_bad_key(self):
+        with self.assertRaises(ValueError):
+            validate_test_prices({5: 100})  # type: ignore
+            
+    def test_validate_doctors_record_not_a_dict(self):
+        with self.assertRaises(ValueError):
+            validate_doctors({"D1": "bad"})  # type: ignore
+
+    def test_validate_patients_record_not_a_dict(self):
+        with self.assertRaises(ValueError):
+            validate_patients({"P1": "bad"})  # type: ignore
 
 class TestValidatePatients(BaseTestCase):
 
@@ -186,6 +254,16 @@ class TestValidatePatients(BaseTestCase):
         bad = {"P1": {"name": "A", "age": 30, "city": "X", "insurance": "yes"}}
         with self.assertRaises(ValueError):
             validate_patients(bad)
+            
+    def test_empty_name(self):
+        bad = {"P1": {"name": "", "age": 30, "city": "X", "insurance": True}}
+        with self.assertRaises(ValueError):
+            validate_patients(bad)
+
+    def test_bad_key(self):
+        bad = {7: {"name": "A", "age": 30, "city": "X", "insurance": True}}
+        with self.assertRaises(ValueError):
+            validate_patients(bad)  # type: ignore
 
 class TestBilling(BaseTestCase):
 
@@ -195,14 +273,49 @@ class TestBilling(BaseTestCase):
     def test_calculate_test_charges_empty(self):
         self.assertEqual(calculate_test_charges([]), 0)
 
-    def test_calculate_test_charges_unknown_test_counts_zero(self):
-        self.assertEqual(calculate_test_charges(["UNKNOWN"]), 0)
+    def test_calculate_test_charges_unknown_test_raises(self):
+        with self.assertRaises(ValueError):
+            calculate_test_charges(["UNKNOWN"])
 
-    def test_calculate_total(self):
-        self.assertEqual(calculate_total(5000, 1500, 1000), 7500)
+    def test_calculate_test_charges_non_string_raises(self):
+        with self.assertRaises(ValueError):
+            calculate_test_charges([["ECG"]])
 
-    def test_calculate_total_default_other_charges(self):
-        self.assertEqual(calculate_total(5000, 1500), 6500)
+    def test_bill_rejects_negative_fee(self):
+        with self.assertRaises(ValueError):
+            calculate_bill(-5000, 0, False, 30)
+
+    def test_bill_rejects_negative_test_charges(self):
+        with self.assertRaises(ValueError):
+            calculate_bill(5000, -1000, False, 30)
+
+    def test_bill_rejects_nan_and_infinity(self):
+        for bad in (float("nan"), float("inf")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    calculate_bill(bad, 0, False, 30)
+
+    def test_bill_rejects_bad_age(self):
+        for bad in ("old", -5, None, True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    calculate_bill(5000, 0, False, bad)
+
+    def test_bill_rejects_bad_config_rates(self):
+        original = dict(CLINIC_CONFIG)
+        try:
+            for key, bad in [("insurance_consultation_rate", 1.5),
+                             ("insurance_test_rate", -0.1),
+                             ("senior_discount_rate", 5.0),
+                             ("senior_discount_rate", -1),
+                             ("senior_age_threshold", "sixty")]:
+                with self.subTest(key=key, bad=bad):
+                    CLINIC_CONFIG[key] = bad
+                    with self.assertRaises(ValueError):
+                        calculate_bill(5000, 0, True, 70)
+                    CLINIC_CONFIG.update(original)
+        finally:
+            CLINIC_CONFIG.update(original)
 
     def test_insurance_coverage(self):
         consult_cov, test_cov = calculate_insurance_coverage(5000, 2500, True)
@@ -211,6 +324,16 @@ class TestBilling(BaseTestCase):
 
     def test_no_insurance_coverage(self):
         self.assertEqual(calculate_insurance_coverage(5000, 2500, False), (0, 0))
+        
+    def test_bill_rejects_huge_amounts(self):
+        with self.assertRaises(ValueError):
+            calculate_bill(1e30, 0, False, 30)
+
+    def test_bill_rejects_non_bool_insurance(self):
+        for bad in ("yes", "no", None, 1):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    calculate_bill(5000, 0, bad, 30)  # type: ignore
 
     def test_bill_with_insurance(self):
         bill = calculate_bill(5000, 2500, True, 32)
@@ -233,15 +356,21 @@ class TestBilling(BaseTestCase):
         bill = calculate_bill(5000, 2500, True, 70)
         self.assertEqual(bill["final_amount"], 4725)
 
-    def test_get_senior_threshold(self):
-        self.assertEqual(get_senior_threshold(), CLINIC_CONFIG["senior_age_threshold"])
-        self.assertEqual(get_senior_threshold(), 60)
-
     def test_bill_rounded_to_two_decimals(self):
         bill = calculate_bill(3333, 0, True, 67)
-        self.assertEqual(bill["consultation_coverage"], 666.6)
-        self.assertEqual(bill["senior_discount"], 266.64)
-        self.assertEqual(bill["final_amount"], 2399.76)
+        self.assertEqual(bill["consultation_coverage"], Decimal("666.60"))
+        self.assertEqual(bill["senior_discount"], Decimal("266.64"))
+        self.assertEqual(bill["final_amount"], Decimal("2399.76"))
+        
+    def test_bill_amounts_are_decimal(self):
+        bill = calculate_bill(5000, 2500, True, 32)
+        for key, value in bill.items():
+            with self.subTest(key=key):
+                self.assertIsInstance(value, Decimal)
+
+    def test_bill_has_no_float_error(self):
+        bill = calculate_bill(0.1, 0.2, False, 30)
+        self.assertEqual(bill["final_amount"], Decimal("0.30"))
 
 class TestCalculateBillKwargs(BaseTestCase):
 
@@ -319,6 +448,11 @@ class TestProcessAppointment(BaseTestCase):
         r1 = process_appointment(hms.appointments[0])
         r2 = process_appointment(hms.appointments[0])
         self.assertEqual(r1["bill"]["final_amount"], r2["bill"]["final_amount"])
+        
+    def test_bad_patient_record_rejected_not_crash(self):
+        del hms.patients["P001"]["age"]
+        result = process_appointment(make_appt(status="completed"))
+        self.assertEqual(result["status"], "REJECTED")
 
     def test_process_all_appointments(self):
         results = process_all_appointments(hms.appointments)
@@ -336,10 +470,26 @@ class TestProcessAppointment(BaseTestCase):
         self.assertEqual(result["status"], "REJECTED")
         self.assertIn("Pending", result["reason"])
         
+    def test_bad_doctor_fee_rejected_not_crash(self):
+        hms.doctors["D001"]["fee"] = -100
+        result = process_appointment(make_appt(status="completed"))
+        self.assertEqual(result["status"], "REJECTED")
+        
     def test_missing_appointment_id_rejected(self):
         appt = make_appt(status="completed")
         del appt["appointment_id"]
         self.assertEqual(process_appointment(appt)["status"], "REJECTED")
+        
+    def test_ids_with_spaces_and_lowercase_are_accepted(self):
+        result = process_appointment(
+            make_appt(patient_id=" p001 ", doctor_id="d001", status="completed"))
+        self.assertEqual(result["status"], "APPROVED")
+        self.assertEqual(result["patient_id"], "P001")
+        self.assertEqual(result["doctor_id"], "D001")
+
+    def test_unknown_id_still_rejected_after_normalizing(self):
+        result = process_appointment(make_appt(patient_id=" p999 ", status="completed"))
+        self.assertEqual(result["status"], "REJECTED")
 
     def test_blank_appointment_id_rejected(self):
         result = process_appointment(make_appt(appointment_id="   ", status="completed"))
@@ -361,6 +511,21 @@ class TestProcessAppointment(BaseTestCase):
         result = process_appointment(appt, None, pts, docs, prices)
         self.assertEqual(result["status"], "APPROVED")
         self.assertEqual(result["bill"]["final_amount"], 990)
+    
+    def test_process_all_rejects_non_list(self):
+        for bad in (None, "text", 5, {"a": 1}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    process_all_appointments(bad)
+
+    def test_processed_ids_must_be_a_set(self):
+        with self.assertRaises(ValueError):
+            process_appointment(hms.appointments[0], [])
+            
+    def test_huge_doctor_fee_rejected_not_crash(self):
+        hms.doctors["D001"]["fee"] = 10**40
+        result = process_appointment(make_appt(status="completed"))
+        self.assertEqual(result["status"], "REJECTED")
     
 class TestCancelAppointment(BaseTestCase):
 
@@ -385,7 +550,22 @@ class TestCancelAppointment(BaseTestCase):
         ok, msg = cancel_appointment(make_appt(status="weird"))
         self.assertFalse(ok)
         self.assertIn("Invalid status", msg)
+        
+    def test_cancel_none_fails(self):
+        ok, msg = cancel_appointment(None)  # type: ignore
+        self.assertFalse(ok)
+        self.assertIn("dictionary", msg)
 
+    def test_cancel_without_id_fails(self):
+        appt = make_appt(status="pending")
+        del appt["appointment_id"]
+        ok, msg = cancel_appointment(appt)
+        self.assertFalse(ok)
+        self.assertEqual(appt["status"], "pending")
+
+    def test_cancel_blank_id_fails(self):
+        ok, _ = cancel_appointment(make_appt(appointment_id="  ", status="pending"))
+        self.assertFalse(ok)
 
 class TestReports(BaseTestCase):
 
@@ -413,6 +593,15 @@ class TestReports(BaseTestCase):
         self.assertEqual(report["cancelled"], 1)
         self.assertEqual(report["revenue"], 0)
         self.assertEqual(report["average_bill"], 0)
+        
+    def test_reports_count_appointments_with_messy_ids(self):
+        appts = [make_appt("M1", patient_id=" p001 ", doctor_id="d001", status="completed")]
+        results = process_all_appointments(appts)
+        doc, _ = generate_doctor_report("d001", appts, results)
+        pat, _ = generate_patient_report(" p001", appts, results)
+        assert doc is not None and pat is not None
+        self.assertEqual(doc["total_appointments"], 1)
+        self.assertEqual(pat["total_appointments"], 1)
 
     def test_doctor_with_no_appointments(self):
         hms.doctors["D_EMPTY"] = {"name": "Dr. Empty", "specialization": "None",
@@ -429,6 +618,19 @@ class TestReports(BaseTestCase):
         self.assertEqual(report["total_spent"], 5250)
         self.assertEqual(report["total_saved"], 2250)
 
+    def test_senior_count_uses_config_threshold(self):
+        original = CLINIC_CONFIG["senior_age_threshold"]
+        try:
+            CLINIC_CONFIG["senior_age_threshold"] = 70
+            dash = generate_clinic_report(hms.appointments, self.results)
+            self.assertEqual(dash["senior_patient_count"], 0)
+        finally:
+            CLINIC_CONFIG["senior_age_threshold"] = original
+
+    def test_top_doctor_empty_when_no_revenue(self):
+        dash = generate_clinic_report([], [])
+        self.assertEqual(dash["top_doctor"], [])
+
     def test_patient_report_senior_savings(self):
         report = patient_report_of("P004", hms.appointments, self.results)
         self.assertEqual(report["total_spent"], 5850)
@@ -443,6 +645,19 @@ class TestReports(BaseTestCase):
         report, status = generate_patient_report("P999", hms.appointments, self.results)
         self.assertIsNone(report)
         self.assertIn("P999", status)
+        
+    def test_reports_reject_non_numeric_bill_values(self):
+        bad = [{"appointment_id": "A", "status": "APPROVED", "patient_id": "P001",
+                "doctor_id": "D001",
+                "bill": {"final_amount": "x", "total_coverage": 1, "senior_discount": 1}}]
+        with self.assertRaises(ValueError):
+            generate_clinic_report([], bad)
+
+    def test_report_with_list_id_returns_not_found(self):
+        report, status = generate_doctor_report(["D001"], [], [])  # type: ignore
+        self.assertIsNone(report)
+        report, status = generate_patient_report(["P001"], [], [])  # type: ignore
+        self.assertIsNone(report)
 
     def test_clinic_report(self):
         dash = generate_clinic_report(hms.appointments, self.results)
@@ -472,6 +687,36 @@ class TestReports(BaseTestCase):
         dash = generate_clinic_report(appts, results)
         self.assertEqual(dash["most_requested_doctor"], ["Dr. Hassan", "Dr. Sara"])
 
+    def test_reports_reject_bad_appointments_list(self):
+        for bad in (None, "text", [None], [{"x": 1}]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    generate_doctor_report("D001", bad, [])  
+                with self.assertRaises(ValueError):
+                    generate_patient_report("P001", bad, [])  
+                with self.assertRaises(ValueError):
+                    generate_clinic_report(bad, [])  
+
+    def test_reports_reject_bad_results(self):
+        bad_results = [None, "text", [None], [{"status": "APPROVED"}],
+                       [{"appointment_id": "A", "status": "APPROVED",
+                         "patient_id": "P001", "doctor_id": "D001"}],
+                       [{"appointment_id": "A", "status": "APPROVED",
+                         "patient_id": "P001", "doctor_id": "D001", "bill": {}}]]
+        for bad in bad_results:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    generate_doctor_report("D001", hms.appointments, bad)  
+                with self.assertRaises(ValueError):
+                    generate_patient_report("P001", hms.appointments, bad)  # type: ignore
+                with self.assertRaises(ValueError):
+                    generate_clinic_report(hms.appointments, bad)  # type: ignore
+
+    def test_highest_spending_patient_empty_when_nobody_spent(self):
+        results = process_all_appointments([])
+        dash = generate_clinic_report([], results)
+        self.assertEqual(dash["highest_spending_patient"], [])
+
 class TestArgsKwargs(BaseTestCase):
 
     def test_combine_bills(self):
@@ -497,6 +742,35 @@ class TestArgsKwargs(BaseTestCase):
     def test_search_unknown_field_raises(self):
         with self.assertRaises(ValueError):
             search_patients(cty="Lahore")
+            
+    def test_kwargs_rejects_negative_fee(self):
+        result, error = calculate_bill_kwargs(-5000)
+        self.assertIsNone(result)
+        self.assertIn("consultation_fee", str(error))
+
+    def test_kwargs_rejects_non_numeric_fee(self):
+        result, error = calculate_bill_kwargs("5000")
+        self.assertIsNone(result)
+
+    def test_kwargs_rejects_negative_age(self):
+        result, error = calculate_bill_kwargs(5000, age=-5)
+        self.assertIsNone(result)
+        self.assertIn("age", str(error))
+
+    def test_kwargs_rejects_unknown_test(self):
+        result, error = calculate_bill_kwargs(5000, tests=["NOPE"])
+        self.assertIsNone(result)
+        self.assertIn("NOPE", str(error))
+
+    def test_kwargs_rejects_non_string_test(self):
+        result, error = calculate_bill_kwargs(5000, tests=[["x"]])
+        self.assertIsNone(result)
+        
+    def test_combine_bills_rejects_bad_values(self):
+        for bad in ("a", None, -5, float("nan"), True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    combine_bills(100, bad)  # type: ignore
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
