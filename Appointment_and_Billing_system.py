@@ -46,15 +46,23 @@ test_prices = {
 def normalize_id(value):
     return value.strip().upper() if isinstance(value, str) else value
 
+def normalize_test_name(value):
+    return value.strip().upper() if isinstance(value, str) else value
+
 def validate_appointment(appointment, patients=patients, doctors=doctors, test_prices=test_prices):
     if not isinstance(appointment, dict):
         return False, "Appointment must be a dictionary"
+    
     patient_id = normalize_id(appointment.get("patient_id"))
     doctor_id = normalize_id(appointment.get("doctor_id"))
     if not isinstance(patient_id, str) or patient_id not in patients:
         return False, f"Unknown patient {patient_id}"
     elif not isinstance(doctor_id, str) or doctor_id not in doctors:
         return False, f"Unknown doctor {doctor_id}"
+    
+    appointment_id = appointment.get("appointment_id")
+    if not isinstance(appointment_id, str) or not appointment_id.strip():
+        return False, "Invalid or missing appointment_id"
     
     doctor = doctors[doctor_id]
     if not isinstance(doctor, dict):
@@ -64,19 +72,23 @@ def validate_appointment(appointment, patients=patients, doctors=doctors, test_p
 
     available = doctor.get("available")
     doctor_name = doctor.get("name")
-    if not available:
+    if not isinstance(available, bool):
+        return False, f"Doctor {doctor_id}: available must be a bool"
+    if available is not True:
         return False, f"{doctor_name} is not available"
 
     status = appointment.get("status")
+    if isinstance(status, str):
+        status = status.strip().lower()
     if status not in ("completed", "cancelled", "pending"):
-        return False, f"{status} not in options"
+        return False, f"Invalid status: {status} (expected completed, cancelled or pending)"
     
     patient = patients[patient_id]
     if not isinstance(patient, dict):
         return False, f"Invalid record for patient {patient_id}"
 
     age = patient.get("age")
-    if not is_valid_amount(age):
+    if not is_valid_age(age):
         return False, f"Invalid age for patient {patient_id}: {age}"
 
     if not isinstance(patient.get("insurance"), bool):
@@ -86,14 +98,23 @@ def validate_appointment(appointment, patients=patients, doctors=doctors, test_p
     if not isinstance(tests, list) or not all(isinstance(t, str) for t in tests):
         return False, "tests must be a list of strings"
 
-    invalid_tests = [t for t in tests if t not in test_prices]
+    test_prices_upper = {k.upper(): k for k in test_prices}
+    normalized_tests = [normalize_test_name(t) for t in tests]
+    invalid_tests = [t for t, n in zip(tests, normalized_tests) if n not in test_prices_upper]
     if invalid_tests:
         return False, f"Invalid test(s): {invalid_tests}"
 
-    if len(tests) != len(set(tests)):
+    if len(normalized_tests) != len(set(normalized_tests)):
         return False, f"Duplicate test(s) in: {tests}"
 
     return True, "Valid"
+
+def is_valid_age(age):
+    if isinstance(age, bool):
+        return False
+    if not is_valid_amount(age):
+        return False
+    return age == int(age)
 
 def validate_doctors(doctors):
     if not isinstance(doctors, dict):
@@ -103,6 +124,8 @@ def validate_doctors(doctors):
             raise ValueError(f"Invalid doctor id: {doctor_id!r}")
         if not isinstance(doctor, dict):
             raise ValueError(f"{doctor_id}: doctor must be a dict")
+        if doctor_id != normalize_id(doctor_id):
+            raise ValueError(f"Doctor id {doctor_id!r} must be trimmed and upper-case")
         for key in ("name", "specialization"):
             value = doctor.get(key)
             if not isinstance(value, str) or not value.strip():
@@ -118,14 +141,17 @@ def validate_patients(patients):
     for patient_id, patient in patients.items():
         if not isinstance(patient_id, str) or not patient_id.strip():
             raise ValueError(f"Invalid patient id: {patient_id!r}")
+        if patient_id != normalize_id(patient_id):
+            raise ValueError(f"Patient id {patient_id!r} must be trimmed and upper-case")
         if not isinstance(patient, dict):
             raise ValueError(f"{patient_id}: patient must be a dict")
         name = patient.get("name")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"{patient_id}: missing or invalid name")
-        if not isinstance(patient.get("city"), str):
+        city = patient.get("city")
+        if not isinstance(city, str) or not city.strip():
             raise ValueError(f"{patient_id}: missing or invalid city")
-        if not is_valid_amount(patient.get("age")):
+        if not is_valid_age(patient.get("age")):
             raise ValueError(f"{patient_id}: invalid age")
         if not isinstance(patient.get("insurance"), bool):
             raise ValueError(f"{patient_id}: insurance must be a bool")
@@ -149,39 +175,63 @@ def round_money(value):
 
 def is_valid_amount(value):
     """True for a real, finite number from 0 to MAX_AMOUNT (bool is not accepted)."""
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float, Decimal))
-        and math.isfinite(value)
-        and 0 <= value <= MAX_AMOUNT
-    )
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        return False
+    try:
+        return math.isfinite(value) and 0 <= value <= MAX_AMOUNT
+    except OverflowError:
+        return False
 
 def validate_clinic_config(config):
+    if not isinstance(config, dict):
+        raise ValueError("clinic config must be a dict")
     for key in ("insurance_consultation_rate", "insurance_test_rate", "senior_discount_rate"):
         rate = config.get(key)
-        if not is_valid_amount(rate) or rate > 1:
+        if not is_valid_amount(rate) or not isinstance(rate, (int, float, Decimal)) or rate > 1:
             raise ValueError(f"CLINIC_CONFIG[{key!r}] must be a number between 0 and 1")
-    if not is_valid_amount(config.get("senior_age_threshold")):
+    if not is_valid_age(config.get("senior_age_threshold")):
         raise ValueError("CLINIC_CONFIG['senior_age_threshold'] must be a non-negative number")
-
+    
 def calculate_test_charges(tests, test_prices=test_prices):
     if not isinstance(tests, list):
         raise ValueError("tests must be a list")
+    test_prices_upper = {k.upper(): v for k, v in test_prices.items()}
+    
     for t in tests:
         if not isinstance(t, str):
             raise ValueError(f"Invalid test name: {t!r}")
-        if t not in test_prices:
+    normalized = [normalize_test_name(t) for t in tests]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(f"Duplicate test(s) in: {tests}")
+    
+    total = Decimal("0")
+    for t in tests:
+        if not isinstance(t, str):
+            raise ValueError(f"Invalid test name: {t!r}")
+        key = t.strip().upper()
+        if key not in test_prices_upper:
             raise ValueError(f"Unknown test: {t}")
-    return sum((to_money(test_prices[t]) for t in tests), Decimal("0"))
+        price = test_prices_upper[key]
+        if not is_valid_amount(price):
+            raise ValueError(f"Invalid price for test {t!r}: {price!r}")
+        total += to_money(price)
+    return total
 
-def calculate_insurance_coverage(consultation_fee, test_charges, has_insurance):
+def calculate_insurance_coverage(consultation_fee, test_charges, has_insurance, config=CLINIC_CONFIG):
+    if not is_valid_amount(consultation_fee):
+        raise ValueError(f"Invalid consultation fee: {consultation_fee!r}")
+    if not is_valid_amount(test_charges):
+        raise ValueError(f"Invalid test charges: {test_charges!r}")
+    if not isinstance(has_insurance, bool):
+        raise ValueError(f"has_insurance must be True or False, not {has_insurance!r}")
+    validate_clinic_config(config)
     if not has_insurance:
         return Decimal("0.00"), Decimal("0.00")
-    consultation_coverage = to_money(consultation_fee) * to_money(CLINIC_CONFIG["insurance_consultation_rate"])
-    test_coverage = to_money(test_charges) * to_money(CLINIC_CONFIG["insurance_test_rate"])
+    consultation_coverage = to_money(consultation_fee) * to_money(config["insurance_consultation_rate"])
+    test_coverage = to_money(test_charges) * to_money(config["insurance_test_rate"])
     return round_money(consultation_coverage), round_money(test_coverage)
 
-def calculate_bill(consultation_fee, test_charges, has_insurance, age):
+def calculate_bill(consultation_fee, test_charges, has_insurance, age, config=CLINIC_CONFIG):
     if not is_valid_amount(consultation_fee):
         raise ValueError(f"Invalid consultation fee: {consultation_fee!r}")
     if not is_valid_amount(test_charges):
@@ -190,20 +240,20 @@ def calculate_bill(consultation_fee, test_charges, has_insurance, age):
         raise ValueError(f"Invalid age: {age!r}")
     if not isinstance(has_insurance, bool):
         raise ValueError(f"has_insurance must be True or False, not {has_insurance!r}")
-    validate_clinic_config(CLINIC_CONFIG)
+    validate_clinic_config(config)
     fee = to_money(consultation_fee)
     tests_total = to_money(test_charges)
 
     subtotal = round_money(fee + tests_total)
     consultation_coverage, test_coverage = calculate_insurance_coverage(
-        fee, tests_total, has_insurance
+        fee, tests_total, has_insurance, config
     )
     total_coverage = round_money(consultation_coverage + test_coverage)
     after_insurance = round_money(subtotal - total_coverage)
 
     senior_discount = Decimal("0.00")
-    if age >= CLINIC_CONFIG["senior_age_threshold"]:
-        senior_discount = round_money(after_insurance * to_money(CLINIC_CONFIG["senior_discount_rate"]))
+    if age >= config["senior_age_threshold"]:
+        senior_discount = round_money(after_insurance * to_money(config["senior_discount_rate"]))
 
     final_amount = round_money(after_insurance - senior_discount)
 
@@ -215,7 +265,7 @@ def calculate_bill(consultation_fee, test_charges, has_insurance, age):
         "after_insurance": after_insurance,
         "senior_discount": senior_discount,
         "final_amount": final_amount
-    }    
+    }
     
 def validate_report_inputs(appointments, processed_results):
     if not isinstance(appointments, (list, tuple)):
@@ -245,7 +295,7 @@ def validate_report_inputs(appointments, processed_results):
                     raise ValueError(f"bill has an invalid '{key}'")
 
 def process_appointment(appointment, processed_appointment_ids=None,
-                        patients=patients, doctors=doctors, test_prices=test_prices):
+                        patients=patients, doctors=doctors, test_prices=test_prices, config=CLINIC_CONFIG):
     if processed_appointment_ids is None:
         processed_appointment_ids = set()
     elif not isinstance(processed_appointment_ids, set):
@@ -255,6 +305,11 @@ def process_appointment(appointment, processed_appointment_ids=None,
         return {"appointment_id": None, "status": "REJECTED",
                 "reason": "Appointment must be a dictionary",
                 "patient_id": None, "doctor_id": None}
+
+    status = appointment.get("status")
+    if isinstance(status, str):
+        status = status.strip().lower()
+        
     patient_id = normalize_id(appointment.get("patient_id"))
     doctor_id = normalize_id(appointment.get("doctor_id"))
 
@@ -269,7 +324,7 @@ def process_appointment(appointment, processed_appointment_ids=None,
                 "reason": f"Appointment {appointment_id} already processed",
                 "patient_id": patient_id, "doctor_id": doctor_id}
 
-    if appointment.get("status") == "cancelled":
+    if status == "cancelled":
         return {"appointment_id": appointment_id, "status": "REJECTED",
                 "reason": "Cannot process a cancelled appointment",
                 "patient_id": patient_id, "doctor_id": doctor_id}
@@ -279,8 +334,8 @@ def process_appointment(appointment, processed_appointment_ids=None,
                 "reason": reason,
                 "patient_id": patient_id, "doctor_id": doctor_id}
 
-    if appointment["status"] == "pending":
-        return {"appointment_id": appointment_id, "status": "REJECTED",
+    if status == "pending":
+        return {"appointment_id": appointment_id, "status": "PENDING",
                 "reason": "Pending appointments cannot be billed until completed",
                 "patient_id": patient_id, "doctor_id": doctor_id}
 
@@ -295,7 +350,8 @@ def process_appointment(appointment, processed_appointment_ids=None,
             consultation_fee,
             test_charges,
             patient["insurance"],
-            patient["age"]
+            patient["age"],
+            config
         )
     except ValueError as e:
         return {"appointment_id": appointment_id, "status": "REJECTED",
@@ -320,6 +376,8 @@ def cancel_appointment(appointment):
         return False, "Cannot cancel: appointment_id is required"
 
     status = appointment.get("status")
+    if isinstance(status, str):
+        status = status.strip().lower()
     if status == "completed":
         return False, f"Cannot cancel: appointment {appointment.get('appointment_id')} is already completed"
     if status == "cancelled":
@@ -330,13 +388,13 @@ def cancel_appointment(appointment):
 
     return False, f"Invalid status: {status}"
 
-def process_all_appointments(appointments, patients=patients, doctors=doctors, test_prices=test_prices):
+def process_all_appointments(appointments, patients=patients, doctors=doctors, test_prices=test_prices, config=CLINIC_CONFIG):
     if not isinstance(appointments, (list, tuple)):
         raise ValueError("appointments must be a list")
     processed_ids = set()
     results = []
     for a in appointments:
-        result = process_appointment(a, processed_ids, patients, doctors, test_prices)
+        result = process_appointment(a, processed_ids, patients, doctors, test_prices, config)
         results.append(result)
     return results
 
@@ -401,7 +459,7 @@ def generate_patient_report(patient_id, appointments, processed_results, patient
         "total_saved": total_saved
     }, "OK"
     
-def generate_clinic_report(appointments, processed_results, patients=patients, doctors=doctors):
+def generate_clinic_report(appointments, processed_results, patients=patients, doctors=doctors, config=CLINIC_CONFIG):
     validate_report_inputs(appointments, processed_results)
     total_appointments = len(appointments)
     completed = [a for a in appointments if a["status"] == "completed"]
@@ -437,7 +495,7 @@ def generate_clinic_report(appointments, processed_results, patients=patients, d
         top_doctor = []
 
     insured_patients = [p for p in patients.values() if p["insurance"]]
-    senior_patients = [p for p in patients.values() if p["age"] >= CLINIC_CONFIG["senior_age_threshold"]]
+    senior_patients = [p for p in patients.values() if p["age"] >= config["senior_age_threshold"]]
 
     patient_reports = []
     for p in patients:
@@ -490,16 +548,22 @@ def search_patients(patients_data=None, **criteria):
     return results
 
 def calculate_bill_kwargs(consultation_fee, **options):
-    allowed_keys = {"insurance", "senior_discount", "age", "tests", "include_tests"}
+    allowed_keys = {"insurance", "senior_discount", "age", "tests", "include_tests", "config", "test_prices"}
     unknown = set(options) - allowed_keys
     if unknown:
         return None, f"Unknown option(s): {', '.join(sorted(unknown))}"
 
     has_insurance = options.get("insurance", False)
     apply_senior = options.get("senior_discount", False)
-    age = options.get("age", 0)
     include_tests = options.get("include_tests", True)
+    config = options.get("config", CLINIC_CONFIG)
+    prices = options.get("test_prices", test_prices)
     tests = options.get("tests", [])
+
+    if apply_senior and "age" not in options:
+        return None, "age is required when senior_discount is True"
+
+    age = options.get("age", 0)
 
     if not isinstance(has_insurance, bool):
         return None, "insurance must be a bool"
@@ -515,17 +579,20 @@ def calculate_bill_kwargs(consultation_fee, **options):
         return None, "tests must be a list"
     if not all(isinstance(t, str) for t in tests):
         return None, f"tests must be a list of strings: {tests}"
-    if len(tests) != len(set(tests)):
+    normalized_tests = [normalize_test_name(t) for t in tests]
+    if len(normalized_tests) != len(set(normalized_tests)):
         return None, f"Duplicate test(s) in: {tests}"
 
     tests = tests if include_tests else []
     try:
-        test_charges = calculate_test_charges(tests)
+        validate_test_prices(prices)
+        test_charges = calculate_test_charges(tests, prices)
         bill = calculate_bill(
             consultation_fee,
             test_charges,
             has_insurance,
-            age if apply_senior else 0
+            age if apply_senior else 0,
+            config
         )
     except ValueError as e:
         return None, str(e)
@@ -547,7 +614,7 @@ def main():
             print(f"{result['appointment_id']} -> APPROVED | "
                   f"Patient pays: {result['bill']['final_amount']:.2f}")
         else:
-            print(f"{result['appointment_id']} -> REJECTED | Reason: {result['reason']}")
+            print(f"{result['appointment_id']} -> {result['status']} | Reason: {result['reason']}")
     print("\n" + "=" * 40)
     print("     CANCELLATION TEST")
     print("=" * 40)
@@ -588,7 +655,6 @@ def main():
     print("search_patients(insurance=True) ->", search_patients(insurance=True))
     result, error = calculate_bill_kwargs(5000, insurance=True, senior_discount=True, age=67, tests=["ECG"])
     print("calculate_bill_kwargs demo ->", result)
-
 
 if __name__ == "__main__":
     main()

@@ -325,6 +325,12 @@ class TestBilling(BaseTestCase):
     def test_no_insurance_coverage(self):
         self.assertEqual(calculate_insurance_coverage(5000, 2500, False), (0, 0))
         
+    def test_calculate_bill_custom_config(self):
+        custom_config = dict(CLINIC_CONFIG)
+        custom_config["senior_discount_rate"] = 0.25
+        bill = calculate_bill(5000, 0, False, 65, custom_config)
+        self.assertEqual(bill["senior_discount"], 1250)
+        
     def test_bill_rejects_huge_amounts(self):
         with self.assertRaises(ValueError):
             calculate_bill(1e30, 0, False, 30)
@@ -426,6 +432,27 @@ class TestProcessAppointment(BaseTestCase):
         result = process_appointment(hms.appointments[3])
         self.assertEqual(result["status"], "APPROVED")
         self.assertEqual(result["bill"]["final_amount"], 5850)
+        
+    def test_none_appointment_is_rejected(self):
+        result = process_appointment(None)
+        self.assertEqual(result["status"], "REJECTED")
+        self.assertIsNone(result["appointment_id"])
+
+    def test_non_dict_appointment_is_rejected(self):
+        for bad in ([], "A001", 5, ("a",)):
+            with self.subTest(bad=bad):
+                result = process_appointment(bad)
+                self.assertEqual(result["status"], "REJECTED")
+                self.assertIn("dictionary", result["reason"])
+
+    def test_none_in_batch_does_not_stop_others(self):
+        good = copy.deepcopy(hms.appointments[0])
+        other = copy.deepcopy(hms.appointments[1])
+        results = process_all_appointments([good, None, other])
+        self.assertEqual(
+            [r["status"] for r in results],
+            ["APPROVED", "REJECTED", "APPROVED"],
+        )
 
     def test_rejected_invalid_patient(self):
         result = process_appointment(make_appt(patient_id="P999"))
@@ -467,13 +494,19 @@ class TestProcessAppointment(BaseTestCase):
     
     def test_pending_appointment_not_billed(self):
         result = process_appointment(make_appt(status="pending", tests=["MRI"]))
-        self.assertEqual(result["status"], "REJECTED")
+        self.assertEqual(result["status"], "PENDING")
         self.assertIn("Pending", result["reason"])
         
     def test_bad_doctor_fee_rejected_not_crash(self):
         hms.doctors["D001"]["fee"] = -100
         result = process_appointment(make_appt(status="completed"))
         self.assertEqual(result["status"], "REJECTED")
+        
+    def test_invalid_status_message(self):
+        ok, reason = validate_appointment(make_appt(status="bogus"))
+        self.assertFalse(ok)
+        self.assertIn("Invalid status", reason)
+        self.assertIn("completed, cancelled or pending", reason)
         
     def test_missing_appointment_id_rejected(self):
         appt = make_appt(status="completed")
@@ -771,6 +804,135 @@ class TestArgsKwargs(BaseTestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     combine_bills(100, bad)  # type: ignore
+                    
+    def test_senior_discount_requires_age(self):
+        result, error = calculate_bill_kwargs(5000, senior_discount=True)
+        self.assertIsNone(result)
+        self.assertIn("age", str(error))
+
+    def test_custom_config_is_used(self):
+        cfg = dict(CLINIC_CONFIG, insurance_consultation_rate=0.5)
+        result, error = calculate_bill_kwargs(5000, insurance=True, config=cfg)
+        self.assertIsNone(error)
+        self.assertEqual(result, Decimal("2500.00"))
+
+    def test_custom_config_changes_senior_threshold(self):
+        cfg = dict(CLINIC_CONFIG, senior_age_threshold=70)
+        # age 67 is below the custom threshold, so no senior discount
+        result, error = calculate_bill_kwargs(
+            5000, senior_discount=True, age=67, config=cfg
+        )
+        self.assertIsNone(error)
+        self.assertEqual(result, Decimal("5000.00"))
+
+    def test_default_config_used_when_not_given(self):
+        with_default, _ = calculate_bill_kwargs(5000, insurance=True)
+        explicit, _ = calculate_bill_kwargs(5000, insurance=True, config=CLINIC_CONFIG)
+        self.assertEqual(with_default, explicit)
+
+    def test_invalid_config_returns_error(self):
+        result, error = calculate_bill_kwargs(5000, config={"x": 1})
+        self.assertIsNone(result)
+        self.assertIsNotNone(error)
+        assert error is not None
+        self.assertIn("insurance_consultation_rate", error)
+
+    def test_config_not_a_dict_returns_error(self):
+        result, error = calculate_bill_kwargs(5000, config="bad")
+        self.assertIsNone(result)
+        self.assertIsNotNone(error)
+        assert error is not None
+        self.assertIn("config", error.lower())
+
+    def test_config_is_not_modified(self):
+        cfg = dict(CLINIC_CONFIG, insurance_consultation_rate=0.5)
+        before = copy.deepcopy(cfg)
+        calculate_bill_kwargs(5000, insurance=True, config=cfg)
+        self.assertEqual(cfg, before)
+        
+    def test_duplicate_tests_different_case_rejected(self):
+        result, error = calculate_bill_kwargs(5000, tests=["ECG", "ecg"])
+        self.assertIsNone(result)
+        self.assertIsNotNone(error)
+        assert error is not None
+        self.assertIn("Duplicate", error)
+
+    def test_duplicate_tests_with_spaces_rejected(self):
+        result, error = calculate_bill_kwargs(5000, tests=[" ECG", "ecg "])
+        self.assertIsNone(result)
+        self.assertIsNotNone(error)
+        assert error is not None
+        self.assertIn("Duplicate", error)
+
+    def test_different_tests_still_accepted(self):
+        result, error = calculate_bill_kwargs(5000, tests=["ECG", "blood test"])
+        self.assertIsNone(error)
+        self.assertEqual(result, Decimal("7500.00"))
+        
+class TestExtraHardening(BaseTestCase):
+
+    def test_is_valid_amount_huge_int_is_false(self):
+        self.assertFalse(hms.is_valid_amount(10**400))
+
+    def test_is_valid_amount_still_accepts_normal_values(self):
+        self.assertTrue(hms.is_valid_amount(5))
+        self.assertTrue(hms.is_valid_amount(0))
+        self.assertFalse(hms.is_valid_amount(-1))
+        self.assertFalse(hms.is_valid_amount(float("nan")))
+
+    # --- #4 ---
+    def test_validate_appointment_rejects_decimal_age(self):
+        patients = copy.deepcopy(hms.patients)
+        patients["P001"]["age"] = 32.5
+        appt = copy.deepcopy(hms.appointments[0])
+        ok, _ = validate_appointment(appt, patients)
+        self.assertFalse(ok)
+
+    def test_validate_patients_rejects_unnormalised_key(self):
+        data = {" p001 ": {"name": "A", "city": "X", "age": 30, "insurance": True}}
+        with self.assertRaises(ValueError):
+            validate_patients(data)
+
+    def test_validate_doctors_rejects_unnormalised_key(self):
+        data = {"d001": {"name": "A", "specialization": "X", "fee": 100, "available": True}}
+        with self.assertRaises(ValueError):
+            validate_doctors(data)
+
+    def test_calculate_test_charges_rejects_duplicates(self):
+        with self.assertRaises(ValueError):
+            calculate_test_charges(["ECG", "ecg"])
+
+    def test_calculate_test_charges_unique_ok(self):
+        self.assertEqual(calculate_test_charges(["ECG", "Blood Test"]), Decimal("2500"))
+
+    def test_insurance_coverage_rejects_bad_fee(self):
+        with self.assertRaises(ValueError):
+            calculate_insurance_coverage("x", 5, True)
+
+    def test_insurance_coverage_rejects_non_bool_insurance(self):
+        with self.assertRaises(ValueError):
+            calculate_insurance_coverage(5000, 0, "yes")
+
+    def test_insurance_coverage_valid(self):
+        self.assertEqual(
+            calculate_insurance_coverage(5000, 2500, True),
+            (Decimal("1000.00"), Decimal("1250.00")),
+        )
+
+    def test_kwargs_custom_test_prices(self):
+        result, error = calculate_bill_kwargs(1000, tests=["CT"], test_prices={"CT": 500})
+        self.assertIsNone(error)
+        self.assertEqual(result, Decimal("1500.00"))
+
+    def test_kwargs_invalid_test_prices(self):
+        result, error = calculate_bill_kwargs(1000, test_prices="x")
+        self.assertIsNone(result)
+        self.assertIsNotNone(error)
+
+    def test_kwargs_default_prices_still_work(self):
+        result, error = calculate_bill_kwargs(5000, tests=["ECG"])
+        self.assertIsNone(error)
+        self.assertEqual(result, Decimal("6500.00"))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

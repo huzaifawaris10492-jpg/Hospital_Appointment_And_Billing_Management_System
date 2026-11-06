@@ -45,6 +45,7 @@ python -m unittest -v
   - Appointment, patient, and doctor IDs are trimmed and upper-cased before matching (`" a1 "` equals `"A1"`).
 - **Cancellation** – only `pending` appointments can be cancelled.
 - **Reports** – per-doctor, per-patient, and clinic dashboard (revenue, top doctor, most requested doctor, insured/senior counts, etc.). Report inputs are validated.
+  - "Revenue" is what patients actually paid (`final_amount`), not the full billed amount — insurance coverage is excluded.
 - **Data validation** – `validate_patients`, `validate_doctors`, `validate_test_prices`, and `validate_clinic_config` check the reference data and rates.
 - **Utilities** – `combine_bills(*bills)`, `search_patients(**criteria)` (unknown fields raise `ValueError`), `calculate_bill_kwargs(...)`.
 
