@@ -10,6 +10,8 @@ from Appointment_and_Billing_system import (
     calculate_insurance_coverage,
     calculate_test_charges,
     cancel_appointment,
+    is_valid_age,
+    find_double_bookings,
     combine_bills,
     generate_clinic_report,
     generate_doctor_report,
@@ -230,6 +232,18 @@ class TestValidateConfigData(BaseTestCase):
     def test_validate_patients_record_not_a_dict(self):
         with self.assertRaises(ValueError):
             validate_patients({"P1": "bad"})  # type: ignore
+            
+    def test_validate_test_prices_case_collision(self):
+        with self.assertRaises(ValueError):
+            validate_test_prices({"X-Ray": 2500, "x-ray": 9999})
+
+    def test_validate_test_prices_whitespace_collision(self):
+        with self.assertRaises(ValueError):
+            validate_test_prices({"ECG": 1500, " ecg ": 1500})
+
+    def test_calculate_test_charges_uses_correct_price_no_collision(self):
+        result = calculate_test_charges(["ECG"], {"ECG": 1500, "X-Ray": 2500})
+        self.assertEqual(result, 1500)
 
 class TestValidatePatients(BaseTestCase):
 
@@ -264,6 +278,20 @@ class TestValidatePatients(BaseTestCase):
         bad = {7: {"name": "A", "age": 30, "city": "X", "insurance": True}}
         with self.assertRaises(ValueError):
             validate_patients(bad)  # type: ignore
+            
+    def test_age_at_cap_is_valid(self):
+        self.assertTrue(is_valid_age(130))
+
+    def test_age_over_cap_is_invalid(self):
+        self.assertFalse(is_valid_age(131))
+
+    def test_age_unrealistically_large_is_invalid(self):
+        self.assertFalse(is_valid_age(1_000_000_000))
+
+    def test_patients_rejects_age_over_cap(self):
+        bad = {"P1": {"name": "A", "age": 131, "city": "X", "insurance": True}}
+        with self.assertRaises(ValueError):
+            validate_patients(bad)
 
 class TestBilling(BaseTestCase):
 
@@ -340,6 +368,10 @@ class TestBilling(BaseTestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     calculate_bill(5000, 0, bad, 30)  # type: ignore
+                    
+    def test_calculate_bill_rejects_age_over_cap(self):
+        with self.assertRaises(ValueError):
+            calculate_bill(5000, 0, False, 1_000_000_000, CLINIC_CONFIG)
 
     def test_bill_with_insurance(self):
         bill = calculate_bill(5000, 2500, True, 32)
@@ -705,6 +737,24 @@ class TestReports(BaseTestCase):
         self.assertEqual(dash["senior_patient_count"], 1)
         self.assertEqual(dash["highest_spending_patient"], ["Usman Ali"])
         self.assertEqual(dash["patients_no_completed_appointment"], ["Sara Ahmed"])
+        
+    def test_reports_normalize_mixed_case_status(self):
+        appts = [
+            make_appt("M2", patient_id="P001", doctor_id="D001", status="Completed"),
+            make_appt("M3", patient_id="P002", doctor_id="D001", status=" CANCELLED "),
+            make_appt("M4", patient_id="P003", doctor_id="D001", status="PENDING"),
+        ]
+        results = process_all_appointments(appts)
+
+        dash = generate_clinic_report(appts, results)
+        self.assertEqual(dash["completed"], 1)
+        self.assertEqual(dash["cancelled"], 1)
+        self.assertEqual(dash["pending"], 1)
+
+        doc = doctor_report_of("D001", appts, results)
+        self.assertEqual(doc["completed"], 1)
+        self.assertEqual(doc["cancelled"], 1)
+        self.assertEqual(doc["pending"], 1)
 
     def test_clinic_report_empty_appointments(self):
         dash = generate_clinic_report([], [])
@@ -837,6 +887,13 @@ class TestArgsKwargs(BaseTestCase):
         assert error is not None
         self.assertIn("insurance_consultation_rate", error)
 
+    def test_calculate_bill_kwargs_rejects_age_over_cap(self):
+        result, error = calculate_bill_kwargs(
+            5000, insurance=False, senior_discount=True, age=1_000_000_000
+        )
+        self.assertIsNone(result)
+        self.assertIsNotNone(error)
+
     def test_config_not_a_dict_returns_error(self):
         result, error = calculate_bill_kwargs(5000, config="bad")
         self.assertIsNone(result)
@@ -933,6 +990,40 @@ class TestExtraHardening(BaseTestCase):
         result, error = calculate_bill_kwargs(5000, tests=["ECG"])
         self.assertIsNone(error)
         self.assertEqual(result, Decimal("6500.00"))
+        
+class TestFindDoubleBookings(BaseTestCase):
+
+    def test_no_conflict_when_no_time_slots(self):
+        appts = [
+            make_appt("D1", doctor_id="D001", status="completed"),
+            make_appt("D2", doctor_id="D001", status="completed"),
+        ]
+        self.assertEqual(find_double_bookings(appts), [])
+
+    def test_detects_real_conflict(self):
+        appts = [
+            {**make_appt("D1", doctor_id="D001", status="completed"), "time_slot": "2026-11-10 10:00"},
+            {**make_appt("D2", doctor_id="D001", status="completed"), "time_slot": "2026-11-10 10:00"},
+        ]
+        self.assertEqual(find_double_bookings(appts), [("D001", "2026-11-10 10:00")])
+
+    def test_ignores_cancelled_duplicate(self):
+        appts = [
+            {**make_appt("D1", doctor_id="D001", status="completed"), "time_slot": "2026-11-10 10:00"},
+            {**make_appt("D2", doctor_id="D001", status="cancelled"), "time_slot": "2026-11-10 10:00"},
+        ]
+        self.assertEqual(find_double_bookings(appts), [])
+
+    def test_different_doctors_same_slot_no_conflict(self):
+        appts = [
+            {**make_appt("D1", doctor_id="D001", status="completed"), "time_slot": "2026-11-10 10:00"},
+            {**make_appt("D2", doctor_id="D002", status="completed"), "time_slot": "2026-11-10 10:00"},
+        ]
+        self.assertEqual(find_double_bookings(appts), [])
+
+    def test_not_a_list_raises(self):
+        with self.assertRaises(ValueError):
+            find_double_bookings("not a list")  # type: ignore
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

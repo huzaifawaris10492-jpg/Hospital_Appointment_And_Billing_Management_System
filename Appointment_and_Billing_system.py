@@ -3,6 +3,7 @@ import math
 from decimal import Decimal, ROUND_HALF_UP
 
 
+MAX_AGE = 130
 MAX_AMOUNT = 10**12  
 CENT = Decimal("0.01")
 CLINIC_CONFIG = {
@@ -46,8 +47,28 @@ test_prices = {
 def normalize_id(value):
     return value.strip().upper() if isinstance(value, str) else value
 
-def normalize_test_name(value):
-    return value.strip().upper() if isinstance(value, str) else value
+def normalize_status(value):
+    return value.strip().lower() if isinstance(value, str) else value
+
+def find_double_bookings(appointments):
+    """Return a list of (doctor_id, time_slot) pairs with more than one active appointment."""
+    if not isinstance(appointments, (list, tuple)):
+        raise ValueError("appointments must be a list")
+    seen = {}
+    conflicts = []
+    for a in appointments:
+        if not isinstance(a, dict):
+            continue
+        if normalize_status(a.get("status")) == "cancelled":
+            continue
+        key = (normalize_id(a.get("doctor_id")), a.get("time_slot"))
+        if key[1] is None:
+            continue
+        if key in seen:
+            conflicts.append(key)
+        else:
+            seen[key] = a.get("appointment_id")
+    return conflicts
 
 def validate_appointment(appointment, patients=patients, doctors=doctors, test_prices=test_prices):
     if not isinstance(appointment, dict):
@@ -79,7 +100,7 @@ def validate_appointment(appointment, patients=patients, doctors=doctors, test_p
 
     status = appointment.get("status")
     if isinstance(status, str):
-        status = status.strip().lower()
+        status = normalize_status(status)
     if status not in ("completed", "cancelled", "pending"):
         return False, f"Invalid status: {status} (expected completed, cancelled or pending)"
     
@@ -99,7 +120,7 @@ def validate_appointment(appointment, patients=patients, doctors=doctors, test_p
         return False, "tests must be a list of strings"
 
     test_prices_upper = {k.upper(): k for k in test_prices}
-    normalized_tests = [normalize_test_name(t) for t in tests]
+    normalized_tests = [normalize_id(t) for t in tests]
     invalid_tests = [t for t, n in zip(tests, normalized_tests) if n not in test_prices_upper]
     if invalid_tests:
         return False, f"Invalid test(s): {invalid_tests}"
@@ -112,9 +133,9 @@ def validate_appointment(appointment, patients=patients, doctors=doctors, test_p
 def is_valid_age(age):
     if isinstance(age, bool):
         return False
-    if not is_valid_amount(age):
+    if not isinstance(age, (int, float, Decimal)) or not math.isfinite(age):
         return False
-    return age == int(age)
+    return 0 <= age <= MAX_AGE and age == int(age)
 
 def validate_doctors(doctors):
     if not isinstance(doctors, dict):
@@ -164,6 +185,9 @@ def validate_test_prices(test_prices):
             raise ValueError(f"Invalid test name: {test_name!r}")
         if not is_valid_amount(price):
             raise ValueError(f"{test_name}: invalid price")
+    normalized_names = [normalize_id(t) for t in test_prices]
+    if len(normalized_names) != len(set(normalized_names)):
+        raise ValueError(f"Duplicate test name(s) after normalization: {test_prices}")
 
 def to_money(value):
     """Convert a number to Decimal (via str, so 0.1 stays exactly 0.1)."""
@@ -200,14 +224,12 @@ def calculate_test_charges(tests, test_prices=test_prices):
     for t in tests:
         if not isinstance(t, str):
             raise ValueError(f"Invalid test name: {t!r}")
-    normalized = [normalize_test_name(t) for t in tests]
+    normalized = [normalize_id(t) for t in tests]
     if len(normalized) != len(set(normalized)):
         raise ValueError(f"Duplicate test(s) in: {tests}")
     
     total = Decimal("0")
     for t in tests:
-        if not isinstance(t, str):
-            raise ValueError(f"Invalid test name: {t!r}")
         key = t.strip().upper()
         if key not in test_prices_upper:
             raise ValueError(f"Unknown test: {t}")
@@ -236,7 +258,7 @@ def calculate_bill(consultation_fee, test_charges, has_insurance, age, config=CL
         raise ValueError(f"Invalid consultation fee: {consultation_fee!r}")
     if not is_valid_amount(test_charges):
         raise ValueError(f"Invalid test charges: {test_charges!r}")
-    if not is_valid_amount(age):
+    if not is_valid_age(age):
         raise ValueError(f"Invalid age: {age!r}")
     if not isinstance(has_insurance, bool):
         raise ValueError(f"has_insurance must be True or False, not {has_insurance!r}")
@@ -308,7 +330,7 @@ def process_appointment(appointment, processed_appointment_ids=None,
 
     status = appointment.get("status")
     if isinstance(status, str):
-        status = status.strip().lower()
+        status = normalize_status(status)
         
     patient_id = normalize_id(appointment.get("patient_id"))
     doctor_id = normalize_id(appointment.get("doctor_id"))
@@ -377,7 +399,7 @@ def cancel_appointment(appointment):
 
     status = appointment.get("status")
     if isinstance(status, str):
-        status = status.strip().lower()
+        status = normalize_status(status)
     if status == "completed":
         return False, f"Cannot cancel: appointment {appointment.get('appointment_id')} is already completed"
     if status == "cancelled":
@@ -407,9 +429,9 @@ def generate_doctor_report(doctor_id, appointments, processed_results, doctors=d
 
     doctor_appointments = [a for a in appointments if normalize_id(a["doctor_id"]) == doctor_id]
     total = len(doctor_appointments)
-    completed = len([a for a in doctor_appointments if a["status"] == "completed"])
-    cancelled = len([a for a in doctor_appointments if a["status"] == "cancelled"])
-    pending = len([a for a in doctor_appointments if a["status"] == "pending"])
+    completed = len([a for a in doctor_appointments if normalize_status(a["status"]) == "completed"])
+    cancelled = len([a for a in doctor_appointments if normalize_status(a["status"]) == "cancelled"])
+    pending = len([a for a in doctor_appointments if normalize_status(a["status"]) == "pending"])
 
     doctor_results = [r for r in processed_results if r["doctor_id"] == doctor_id]
     bills = [r["bill"]["final_amount"] for r in doctor_results if r["status"] == "APPROVED"]
@@ -462,9 +484,9 @@ def generate_patient_report(patient_id, appointments, processed_results, patient
 def generate_clinic_report(appointments, processed_results, patients=patients, doctors=doctors, config=CLINIC_CONFIG):
     validate_report_inputs(appointments, processed_results)
     total_appointments = len(appointments)
-    completed = [a for a in appointments if a["status"] == "completed"]
-    cancelled = [a for a in appointments if a["status"] == "cancelled"]
-    pending = [a for a in appointments if a["status"] == "pending"]
+    completed = [a for a in appointments if normalize_status(a["status"]) == "completed"]
+    cancelled = [a for a in appointments if normalize_status(a["status"]) == "cancelled"]
+    pending = [a for a in appointments if normalize_status(a["status"]) == "pending"]
 
     total_revenue = sum(
         (r["bill"]["final_amount"] for r in processed_results if r["status"] == "APPROVED"),
@@ -573,13 +595,13 @@ def calculate_bill_kwargs(consultation_fee, **options):
         return None, "include_tests must be a bool"
     if not is_valid_amount(consultation_fee):
         return None, "consultation_fee must be a non-negative number"
-    if not is_valid_amount(age):
+    if not is_valid_age(age):
         return None, "age must be a non-negative number"
     if not isinstance(tests, list):
         return None, "tests must be a list"
     if not all(isinstance(t, str) for t in tests):
         return None, f"tests must be a list of strings: {tests}"
-    normalized_tests = [normalize_test_name(t) for t in tests]
+    normalized_tests = [normalize_id(t) for t in tests]
     if len(normalized_tests) != len(set(normalized_tests)):
         return None, f"Duplicate test(s) in: {tests}"
 
@@ -655,6 +677,22 @@ def main():
     print("search_patients(insurance=True) ->", search_patients(insurance=True))
     result, error = calculate_bill_kwargs(5000, insurance=True, senior_discount=True, age=67, tests=["ECG"])
     print("calculate_bill_kwargs demo ->", result)
+    
+    print("\n" + "=" * 40)
+    print("   DOUBLE-BOOKING CHECK")
+    print("=" * 40)
+    double_booking_demo = [
+        {"appointment_id": "DB1", "patient_id": "P001", "doctor_id": "D001",
+         "status": "completed", "tests": [], "time_slot": "2026-11-10 10:00"},
+        {"appointment_id": "DB2", "patient_id": "P002", "doctor_id": "D001",
+         "status": "completed", "tests": [], "time_slot": "2026-11-10 10:00"},
+    ]
+    conflicts = find_double_bookings(double_booking_demo)
+    if conflicts:
+        for doctor_id, slot in conflicts:
+            print(f"Conflict: doctor {doctor_id} double-booked at {slot}")
+    else:
+        print("No conflicts found")
 
 if __name__ == "__main__":
     main()
