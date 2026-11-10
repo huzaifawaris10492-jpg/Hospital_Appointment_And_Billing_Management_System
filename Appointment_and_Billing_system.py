@@ -1,10 +1,11 @@
 import copy
 import math
 from decimal import Decimal, ROUND_HALF_UP
+from datetime import datetime
 
 
 MAX_AGE = 130
-MAX_AMOUNT = 10**12  
+MAX_AMOUNT = 10**12
 CENT = Decimal("0.01")
 CLINIC_CONFIG = {
     "senior_age_threshold": 60,
@@ -50,41 +51,46 @@ def normalize_id(value):
 def normalize_status(value):
     return value.strip().lower() if isinstance(value, str) else value
 
+def normalize_time_slot(value):
+    """Return a time slot as 'YYYY-MM-DD HH:MM'. Raises ValueError if it is not valid."""
+    if not isinstance(value, str):
+        raise ValueError(f"time_slot must be a string, not {value!r}")
+    try:
+        return datetime.fromisoformat(value.strip()).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        raise ValueError(f"Invalid time_slot {value!r} (expected YYYY-MM-DD HH:MM)")
+
 def find_double_bookings(appointments):
-    """Return a list of (doctor_id, time_slot) pairs with more than one active appointment."""
+    """Return (doctor_id, time_slot, [appointment_ids]) for each slot with more than one active appointment."""
     if not isinstance(appointments, (list, tuple)):
         raise ValueError("appointments must be a list")
-    seen = {}
-    conflicts = []
+    slots = {}
     for a in appointments:
         if not isinstance(a, dict):
             continue
         if normalize_status(a.get("status")) == "cancelled":
             continue
-        key = (normalize_id(a.get("doctor_id")), a.get("time_slot"))
-        if key[1] is None:
+        if a.get("time_slot") is None:
             continue
-        if key in seen:
-            conflicts.append(key)
-        else:
-            seen[key] = a.get("appointment_id")
-    return conflicts
+        key = (normalize_id(a.get("doctor_id")), normalize_time_slot(a["time_slot"]))
+        slots.setdefault(key, []).append(normalize_id(a.get("appointment_id")))
+    return [(doctor_id, slot, ids) for (doctor_id, slot), ids in slots.items() if len(ids) > 1]
 
 def validate_appointment(appointment, patients=patients, doctors=doctors, test_prices=test_prices):
     if not isinstance(appointment, dict):
         return False, "Appointment must be a dictionary"
-    
+
     patient_id = normalize_id(appointment.get("patient_id"))
     doctor_id = normalize_id(appointment.get("doctor_id"))
     if not isinstance(patient_id, str) or patient_id not in patients:
         return False, f"Unknown patient {patient_id}"
     elif not isinstance(doctor_id, str) or doctor_id not in doctors:
         return False, f"Unknown doctor {doctor_id}"
-    
+
     appointment_id = appointment.get("appointment_id")
     if not isinstance(appointment_id, str) or not appointment_id.strip():
         return False, "Invalid or missing appointment_id"
-    
+
     doctor = doctors[doctor_id]
     if not isinstance(doctor, dict):
         return False, f"Invalid record for doctor {doctor_id}"
@@ -103,7 +109,7 @@ def validate_appointment(appointment, patients=patients, doctors=doctors, test_p
         status = normalize_status(status)
     if status not in ("completed", "cancelled", "pending"):
         return False, f"Invalid status: {status} (expected completed, cancelled or pending)"
-    
+
     patient = patients[patient_id]
     if not isinstance(patient, dict):
         return False, f"Invalid record for patient {patient_id}"
@@ -127,6 +133,12 @@ def validate_appointment(appointment, patients=patients, doctors=doctors, test_p
 
     if len(normalized_tests) != len(set(normalized_tests)):
         return False, f"Duplicate test(s) in: {tests}"
+
+    if appointment.get("time_slot") is not None:
+        try:
+            normalize_time_slot(appointment["time_slot"])
+        except ValueError as e:
+            return False, str(e)
 
     return True, "Valid"
 
@@ -155,7 +167,7 @@ def validate_doctors(doctors):
             raise ValueError(f"{doctor_id}: invalid fee")
         if not isinstance(doctor.get("available"), bool):
             raise ValueError(f"{doctor_id}: available must be a bool")
-        
+
 def validate_patients(patients):
     if not isinstance(patients, dict):
         raise ValueError("patients must be a dict")
@@ -214,20 +226,20 @@ def validate_clinic_config(config):
         if not is_valid_amount(rate) or not isinstance(rate, (int, float, Decimal)) or rate > 1:
             raise ValueError(f"CLINIC_CONFIG[{key!r}] must be a number between 0 and 1")
     if not is_valid_age(config.get("senior_age_threshold")):
-        raise ValueError("CLINIC_CONFIG['senior_age_threshold'] must be a non-negative number")
-    
+        raise ValueError(f"CLINIC_CONFIG['senior_age_threshold'] must be a whole number between 0 and {MAX_AGE}")
+
 def calculate_test_charges(tests, test_prices=test_prices):
     if not isinstance(tests, list):
         raise ValueError("tests must be a list")
     test_prices_upper = {k.upper(): v for k, v in test_prices.items()}
-    
+
     for t in tests:
         if not isinstance(t, str):
             raise ValueError(f"Invalid test name: {t!r}")
     normalized = [normalize_id(t) for t in tests]
     if len(normalized) != len(set(normalized)):
         raise ValueError(f"Duplicate test(s) in: {tests}")
-    
+
     total = Decimal("0")
     for t in tests:
         key = t.strip().upper()
@@ -288,7 +300,7 @@ def calculate_bill(consultation_fee, test_charges, has_insurance, age, config=CL
         "senior_discount": senior_discount,
         "final_amount": final_amount
     }
-    
+
 def validate_report_inputs(appointments, processed_results):
     if not isinstance(appointments, (list, tuple)):
         raise ValueError("appointments must be a list")
@@ -322,7 +334,7 @@ def process_appointment(appointment, processed_appointment_ids=None,
         processed_appointment_ids = set()
     elif not isinstance(processed_appointment_ids, set):
         raise ValueError("processed_appointment_ids must be a set")
-    
+
     if not isinstance(appointment, dict):
         return {"appointment_id": None, "status": "REJECTED",
                 "reason": "Appointment must be a dictionary",
@@ -331,7 +343,7 @@ def process_appointment(appointment, processed_appointment_ids=None,
     status = appointment.get("status")
     if isinstance(status, str):
         status = normalize_status(status)
-        
+
     patient_id = normalize_id(appointment.get("patient_id"))
     doctor_id = normalize_id(appointment.get("doctor_id"))
 
@@ -388,7 +400,7 @@ def process_appointment(appointment, processed_appointment_ids=None,
     "doctor_id": doctor_id,
     "bill": bill
 }
-     
+
 def cancel_appointment(appointment):
     if not isinstance(appointment, dict):
         return False, "Cannot cancel: appointment must be a dictionary"
@@ -415,9 +427,20 @@ def process_all_appointments(appointments, patients=patients, doctors=doctors, t
         raise ValueError("appointments must be a list")
     processed_ids = set()
     results = []
+    bookable = []
     for a in appointments:
         result = process_appointment(a, processed_ids, patients, doctors, test_prices, config)
         results.append(result)
+        if result["status"] != "REJECTED":
+            bookable.append(a)
+    later_ids = set()
+    for _, slot, ids in find_double_bookings(bookable):
+        later_ids.update(ids[1:])
+    for result in results:
+        if result["status"] != "REJECTED" and result["appointment_id"] in later_ids:
+            result["status"] = "REJECTED"
+            result["reason"] = "Doctor is already booked at this time slot"
+            result.pop("bill", None)
     return results
 
 def generate_doctor_report(doctor_id, appointments, processed_results, doctors=doctors):
@@ -451,7 +474,7 @@ def generate_doctor_report(doctor_id, appointments, processed_results, doctors=d
         "revenue": revenue,
         "average_bill" : average_bill,
     }, "OK"
-    
+
 def generate_patient_report(patient_id, appointments, processed_results, patients=patients):
     validate_report_inputs(appointments, processed_results)
     patient_id = normalize_id(patient_id)
@@ -480,7 +503,7 @@ def generate_patient_report(patient_id, appointments, processed_results, patient
         "total_spent": total_spent,
         "total_saved": total_saved
     }, "OK"
-    
+
 def generate_clinic_report(appointments, processed_results, patients=patients, doctors=doctors, config=CLINIC_CONFIG):
     validate_report_inputs(appointments, processed_results)
     total_appointments = len(appointments)
@@ -548,7 +571,7 @@ def generate_clinic_report(appointments, processed_results, patients=patients, d
         "highest_spending_patient": highest_spending_patient,
         "patients_no_completed_appointment": no_completed
     }
-     
+
 def combine_bills(*bills):
     for bill in bills:
         if not is_valid_amount(bill):
@@ -596,7 +619,7 @@ def calculate_bill_kwargs(consultation_fee, **options):
     if not is_valid_amount(consultation_fee):
         return None, "consultation_fee must be a non-negative number"
     if not is_valid_age(age):
-        return None, "age must be a non-negative number"
+        return None, f"age must be a whole number between 0 and {MAX_AGE}"
     if not isinstance(tests, list):
         return None, "tests must be a list"
     if not all(isinstance(t, str) for t in tests):
@@ -646,7 +669,7 @@ def main():
     print(msg)
     ok, msg = cancel_appointment(appts[0])
     print(msg)
- 
+
     print("\n" + "=" * 40)
     print("     DOCTOR REPORT ")
     print("=" * 40)
@@ -654,7 +677,7 @@ def main():
     if report is not None:
         for k, v in report.items():
             print(f"{k}: {v}")
- 
+
     print("\n" + "=" * 40)
     print("     PATIENT REPORT ")
     print("=" * 40)
@@ -662,14 +685,14 @@ def main():
     if report is not None:
         for k, v in report.items():
             print(f"{k}: {v}")
- 
+
     print("\n" + "=" * 40)
     print("      CLINIC DASHBOARD")
     print("=" * 40)
     dashboard = generate_clinic_report(appts, results)
     for k, v in dashboard.items():
         print(f"{k}: {v}")
- 
+
     print("\n" + "=" * 40)
     print("   UTILITY FUNCTIONS ")
     print("=" * 40)
@@ -677,7 +700,7 @@ def main():
     print("search_patients(insurance=True) ->", search_patients(insurance=True))
     result, error = calculate_bill_kwargs(5000, insurance=True, senior_discount=True, age=67, tests=["ECG"])
     print("calculate_bill_kwargs demo ->", result)
-    
+
     print("\n" + "=" * 40)
     print("   DOUBLE-BOOKING CHECK")
     print("=" * 40)
@@ -689,8 +712,8 @@ def main():
     ]
     conflicts = find_double_bookings(double_booking_demo)
     if conflicts:
-        for doctor_id, slot in conflicts:
-            print(f"Conflict: doctor {doctor_id} double-booked at {slot}")
+        for doctor_id, slot, ids in conflicts:
+            print(f"Conflict: doctor {doctor_id} double-booked at {slot} ({', '.join(ids)})")
     else:
         print("No conflicts found")
 

@@ -82,7 +82,7 @@ class TestValidateAppointment(BaseTestCase):
         ok, reason = validate_appointment(make_appt(patient_id="P999"))
         self.assertFalse(ok)
         self.assertIn("P999", reason)
-        
+
     def test_doctor_record_not_a_dict(self):
         hms.doctors["D001"] = "bad"  # type: ignore
         ok, reason = validate_appointment(make_appt())
@@ -201,7 +201,7 @@ class TestValidateConfigData(BaseTestCase):
     def test_validate_test_prices_not_dict(self):
         with self.assertRaises(ValueError):
             validate_test_prices(["ECG"])
-    
+
     def test_validate_doctors_empty_name(self):
         bad = {"D1": {"name": "  ", "specialization": "B", "fee": 10, "available": True}}
         with self.assertRaises(ValueError):
@@ -224,7 +224,7 @@ class TestValidateConfigData(BaseTestCase):
     def test_validate_test_prices_bad_key(self):
         with self.assertRaises(ValueError):
             validate_test_prices({5: 100})  # type: ignore
-            
+
     def test_validate_doctors_record_not_a_dict(self):
         with self.assertRaises(ValueError):
             validate_doctors({"D1": "bad"})  # type: ignore
@@ -232,7 +232,7 @@ class TestValidateConfigData(BaseTestCase):
     def test_validate_patients_record_not_a_dict(self):
         with self.assertRaises(ValueError):
             validate_patients({"P1": "bad"})  # type: ignore
-            
+
     def test_validate_test_prices_case_collision(self):
         with self.assertRaises(ValueError):
             validate_test_prices({"X-Ray": 2500, "x-ray": 9999})
@@ -268,7 +268,7 @@ class TestValidatePatients(BaseTestCase):
         bad = {"P1": {"name": "A", "age": 30, "city": "X", "insurance": "yes"}}
         with self.assertRaises(ValueError):
             validate_patients(bad)
-            
+
     def test_empty_name(self):
         bad = {"P1": {"name": "", "age": 30, "city": "X", "insurance": True}}
         with self.assertRaises(ValueError):
@@ -278,7 +278,7 @@ class TestValidatePatients(BaseTestCase):
         bad = {7: {"name": "A", "age": 30, "city": "X", "insurance": True}}
         with self.assertRaises(ValueError):
             validate_patients(bad)  # type: ignore
-            
+
     def test_age_at_cap_is_valid(self):
         self.assertTrue(is_valid_age(130))
 
@@ -352,13 +352,13 @@ class TestBilling(BaseTestCase):
 
     def test_no_insurance_coverage(self):
         self.assertEqual(calculate_insurance_coverage(5000, 2500, False), (0, 0))
-        
+
     def test_calculate_bill_custom_config(self):
         custom_config = dict(CLINIC_CONFIG)
         custom_config["senior_discount_rate"] = 0.25
         bill = calculate_bill(5000, 0, False, 65, custom_config)
         self.assertEqual(bill["senior_discount"], 1250)
-        
+
     def test_bill_rejects_huge_amounts(self):
         with self.assertRaises(ValueError):
             calculate_bill(1e30, 0, False, 30)
@@ -368,7 +368,7 @@ class TestBilling(BaseTestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     calculate_bill(5000, 0, bad, 30)  # type: ignore
-                    
+
     def test_calculate_bill_rejects_age_over_cap(self):
         with self.assertRaises(ValueError):
             calculate_bill(5000, 0, False, 1_000_000_000, CLINIC_CONFIG)
@@ -399,7 +399,7 @@ class TestBilling(BaseTestCase):
         self.assertEqual(bill["consultation_coverage"], Decimal("666.60"))
         self.assertEqual(bill["senior_discount"], Decimal("266.64"))
         self.assertEqual(bill["final_amount"], Decimal("2399.76"))
-        
+
     def test_bill_amounts_are_decimal(self):
         bill = calculate_bill(5000, 2500, True, 32)
         for key, value in bill.items():
@@ -464,7 +464,7 @@ class TestProcessAppointment(BaseTestCase):
         result = process_appointment(hms.appointments[3])
         self.assertEqual(result["status"], "APPROVED")
         self.assertEqual(result["bill"]["final_amount"], 5850)
-        
+
     def test_none_appointment_is_rejected(self):
         result = process_appointment(None)
         self.assertEqual(result["status"], "REJECTED")
@@ -507,7 +507,7 @@ class TestProcessAppointment(BaseTestCase):
         r1 = process_appointment(hms.appointments[0])
         r2 = process_appointment(hms.appointments[0])
         self.assertEqual(r1["bill"]["final_amount"], r2["bill"]["final_amount"])
-        
+
     def test_bad_patient_record_rejected_not_crash(self):
         del hms.patients["P001"]["age"]
         result = process_appointment(make_appt(status="completed"))
@@ -523,28 +523,36 @@ class TestProcessAppointment(BaseTestCase):
         results = process_all_appointments(appts)
         self.assertEqual(results[0]["status"], "APPROVED")
         self.assertEqual(results[1]["status"], "REJECTED")
-    
+
     def test_pending_appointment_not_billed(self):
         result = process_appointment(make_appt(status="pending", tests=["MRI"]))
         self.assertEqual(result["status"], "PENDING")
         self.assertIn("Pending", result["reason"])
-        
+
     def test_bad_doctor_fee_rejected_not_crash(self):
         hms.doctors["D001"]["fee"] = -100
         result = process_appointment(make_appt(status="completed"))
         self.assertEqual(result["status"], "REJECTED")
-        
+
     def test_invalid_status_message(self):
         ok, reason = validate_appointment(make_appt(status="bogus"))
         self.assertFalse(ok)
         self.assertIn("Invalid status", reason)
         self.assertIn("completed, cancelled or pending", reason)
-        
+
+    def test_process_all_rejects_second_booking_for_slot(self):
+        appts = [
+            {**make_appt("D1", doctor_id="D001", status="completed"), "time_slot": "2026-11-10 10:00"},
+            {**make_appt("D2", doctor_id="D001", status="completed"), "time_slot": "2026-11-10 10:00"},
+        ]
+        results = process_all_appointments(appts)
+        self.assertEqual([r["status"] for r in results], ["APPROVED", "REJECTED"])
+
     def test_missing_appointment_id_rejected(self):
         appt = make_appt(status="completed")
         del appt["appointment_id"]
         self.assertEqual(process_appointment(appt)["status"], "REJECTED")
-        
+
     def test_ids_with_spaces_and_lowercase_are_accepted(self):
         result = process_appointment(
             make_appt(patient_id=" p001 ", doctor_id="d001", status="completed"))
@@ -566,7 +574,7 @@ class TestProcessAppointment(BaseTestCase):
         second = process_appointment(make_appt(appointment_id=" a1 ", status="completed"), processed)
         self.assertEqual(first["status"], "APPROVED")
         self.assertEqual(second["status"], "REJECTED")
-        
+
     def test_process_with_custom_data(self):
         pts = {"X1": {"name": "Z", "age": 70, "city": "C", "insurance": False}}
         docs = {"Q1": {"name": "Dr Q", "specialization": "S", "fee": 1000, "available": True}}
@@ -576,7 +584,7 @@ class TestProcessAppointment(BaseTestCase):
         result = process_appointment(appt, None, pts, docs, prices)
         self.assertEqual(result["status"], "APPROVED")
         self.assertEqual(result["bill"]["final_amount"], 990)
-    
+
     def test_process_all_rejects_non_list(self):
         for bad in (None, "text", 5, {"a": 1}):
             with self.subTest(bad=bad):
@@ -586,12 +594,12 @@ class TestProcessAppointment(BaseTestCase):
     def test_processed_ids_must_be_a_set(self):
         with self.assertRaises(ValueError):
             process_appointment(hms.appointments[0], [])
-            
+
     def test_huge_doctor_fee_rejected_not_crash(self):
         hms.doctors["D001"]["fee"] = 10**40
         result = process_appointment(make_appt(status="completed"))
         self.assertEqual(result["status"], "REJECTED")
-    
+
 class TestCancelAppointment(BaseTestCase):
 
     def test_cancel_pending(self):
@@ -615,7 +623,7 @@ class TestCancelAppointment(BaseTestCase):
         ok, msg = cancel_appointment(make_appt(status="weird"))
         self.assertFalse(ok)
         self.assertIn("Invalid status", msg)
-        
+
     def test_cancel_none_fails(self):
         ok, msg = cancel_appointment(None)  # type: ignore
         self.assertFalse(ok)
@@ -658,7 +666,7 @@ class TestReports(BaseTestCase):
         self.assertEqual(report["cancelled"], 1)
         self.assertEqual(report["revenue"], 0)
         self.assertEqual(report["average_bill"], 0)
-        
+
     def test_reports_count_appointments_with_messy_ids(self):
         appts = [make_appt("M1", patient_id=" p001 ", doctor_id="d001", status="completed")]
         results = process_all_appointments(appts)
@@ -710,7 +718,7 @@ class TestReports(BaseTestCase):
         report, status = generate_patient_report("P999", hms.appointments, self.results)
         self.assertIsNone(report)
         self.assertIn("P999", status)
-        
+
     def test_reports_reject_non_numeric_bill_values(self):
         bad = [{"appointment_id": "A", "status": "APPROVED", "patient_id": "P001",
                 "doctor_id": "D001",
@@ -737,7 +745,7 @@ class TestReports(BaseTestCase):
         self.assertEqual(dash["senior_patient_count"], 1)
         self.assertEqual(dash["highest_spending_patient"], ["Usman Ali"])
         self.assertEqual(dash["patients_no_completed_appointment"], ["Sara Ahmed"])
-        
+
     def test_reports_normalize_mixed_case_status(self):
         appts = [
             make_appt("M2", patient_id="P001", doctor_id="D001", status="Completed"),
@@ -762,7 +770,7 @@ class TestReports(BaseTestCase):
         self.assertEqual(dash["total_revenue"], 0)
         self.assertEqual(dash["completed"], 0)
         self.assertEqual(dash["most_requested_doctor"], [])
-    
+
     def test_most_requested_doctor_tie_returns_all(self):
         appts = [make_appt("T1", doctor_id="D001", status="completed"),
                  make_appt("T2", doctor_id="D002", status="completed")]
@@ -774,11 +782,11 @@ class TestReports(BaseTestCase):
         for bad in (None, "text", [None], [{"x": 1}]):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
-                    generate_doctor_report("D001", bad, [])  
+                    generate_doctor_report("D001", bad, [])
                 with self.assertRaises(ValueError):
-                    generate_patient_report("P001", bad, [])  
+                    generate_patient_report("P001", bad, [])
                 with self.assertRaises(ValueError):
-                    generate_clinic_report(bad, [])  
+                    generate_clinic_report(bad, [])
 
     def test_reports_reject_bad_results(self):
         bad_results = [None, "text", [None], [{"status": "APPROVED"}],
@@ -789,7 +797,7 @@ class TestReports(BaseTestCase):
         for bad in bad_results:
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
-                    generate_doctor_report("D001", hms.appointments, bad)  
+                    generate_doctor_report("D001", hms.appointments, bad)
                 with self.assertRaises(ValueError):
                     generate_patient_report("P001", hms.appointments, bad)  # type: ignore
                 with self.assertRaises(ValueError):
@@ -825,7 +833,7 @@ class TestArgsKwargs(BaseTestCase):
     def test_search_unknown_field_raises(self):
         with self.assertRaises(ValueError):
             search_patients(cty="Lahore")
-            
+
     def test_kwargs_rejects_negative_fee(self):
         result, error = calculate_bill_kwargs(-5000)
         self.assertIsNone(result)
@@ -848,13 +856,13 @@ class TestArgsKwargs(BaseTestCase):
     def test_kwargs_rejects_non_string_test(self):
         result, error = calculate_bill_kwargs(5000, tests=[["x"]])
         self.assertIsNone(result)
-        
+
     def test_combine_bills_rejects_bad_values(self):
         for bad in ("a", None, -5, float("nan"), True):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     combine_bills(100, bad)  # type: ignore
-                    
+
     def test_senior_discount_requires_age(self):
         result, error = calculate_bill_kwargs(5000, senior_discount=True)
         self.assertIsNone(result)
@@ -906,7 +914,7 @@ class TestArgsKwargs(BaseTestCase):
         before = copy.deepcopy(cfg)
         calculate_bill_kwargs(5000, insurance=True, config=cfg)
         self.assertEqual(cfg, before)
-        
+
     def test_duplicate_tests_different_case_rejected(self):
         result, error = calculate_bill_kwargs(5000, tests=["ECG", "ecg"])
         self.assertIsNone(result)
@@ -925,7 +933,7 @@ class TestArgsKwargs(BaseTestCase):
         result, error = calculate_bill_kwargs(5000, tests=["ECG", "blood test"])
         self.assertIsNone(error)
         self.assertEqual(result, Decimal("7500.00"))
-        
+
 class TestExtraHardening(BaseTestCase):
 
     def test_is_valid_amount_huge_int_is_false(self):
@@ -990,7 +998,7 @@ class TestExtraHardening(BaseTestCase):
         result, error = calculate_bill_kwargs(5000, tests=["ECG"])
         self.assertIsNone(error)
         self.assertEqual(result, Decimal("6500.00"))
-        
+
 class TestFindDoubleBookings(BaseTestCase):
 
     def test_no_conflict_when_no_time_slots(self):
@@ -1005,7 +1013,7 @@ class TestFindDoubleBookings(BaseTestCase):
             {**make_appt("D1", doctor_id="D001", status="completed"), "time_slot": "2026-11-10 10:00"},
             {**make_appt("D2", doctor_id="D001", status="completed"), "time_slot": "2026-11-10 10:00"},
         ]
-        self.assertEqual(find_double_bookings(appts), [("D001", "2026-11-10 10:00")])
+        self.assertEqual(find_double_bookings(appts), [("D001", "2026-11-10 10:00", ["D1", "D2"])])
 
     def test_ignores_cancelled_duplicate(self):
         appts = [
@@ -1024,6 +1032,25 @@ class TestFindDoubleBookings(BaseTestCase):
     def test_not_a_list_raises(self):
         with self.assertRaises(ValueError):
             find_double_bookings("not a list")  # type: ignore
+
+    def test_triple_booking_reports_one_conflict_with_all_ids(self):
+        appts = [
+            {**make_appt(i, doctor_id="D001", status="completed"), "time_slot": "2026-11-10 10:00"}
+            for i in ("D1", "D2", "D3")
+        ]
+        self.assertEqual(find_double_bookings(appts), [("D001", "2026-11-10 10:00", ["D1", "D2", "D3"])])
+
+    def test_equivalent_slot_formats_match(self):
+        appts = [
+            {**make_appt("D1", doctor_id="D001", status="completed"), "time_slot": "2026-11-10 10:00"},
+            {**make_appt("D2", doctor_id="d001", status="completed"), "time_slot": " 2026-11-10T10:00 "},
+        ]
+        self.assertEqual(len(find_double_bookings(appts)), 1)
+
+    def test_non_string_slot_raises_value_error(self):
+        appts = [{**make_appt("D1", doctor_id="D001", status="completed"), "time_slot": 1000}]
+        with self.assertRaises(ValueError):
+            find_double_bookings(appts)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

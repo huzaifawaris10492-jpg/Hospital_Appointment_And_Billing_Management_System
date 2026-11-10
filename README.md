@@ -48,7 +48,7 @@ python -m unittest -v
   - "Revenue" is what patients actually paid (`final_amount`), not the full billed amount — insurance coverage is excluded.
 - **Data validation** – `validate_patients`, `validate_doctors`, `validate_test_prices`, and `validate_clinic_config` check the reference data and rates.
 - **Utilities** – `combine_bills(*bills)`, `search_patients(**criteria)` (unknown fields raise `ValueError`), `calculate_bill_kwargs(...)`.
-**Note:** `available` is a clinic-wide flag (e.g. is this doctor currently on staff), not tied to a specific date or time slot. The system does not track appointment time slots, so it cannot detect if a doctor is double-booked at a given time — see `find_double_bookings` for a best-effort conflict check once `time_slot` values are added to appointments
+**Note:** `available` is a clinic-wide flag (e.g. is this doctor currently on staff), not tied to a specific date or time slot. Appointments may include an optional `time_slot` (e.g. `"2026-11-10 10:00"`; `T`-separated and padded forms are accepted). `process_all_appointments` approves the first appointment for a doctor and slot and rejects later ones, and `find_double_bookings` lists every clash as `(doctor_id, time_slot, [appointment_ids])`.
 
 ## Configuration
 
