@@ -162,6 +162,7 @@ class TestValidateAppointment(BaseTestCase):
         ok, _ = validate_appointment(make_appt())
         self.assertFalse(ok)
 
+
 class TestValidateConfigData(BaseTestCase):
 
     def test_validate_doctors_ok(self):
@@ -245,6 +246,7 @@ class TestValidateConfigData(BaseTestCase):
         result = calculate_test_charges(["ECG"], {"ECG": 1500, "X-Ray": 2500})
         self.assertEqual(result, 1500)
 
+
 class TestValidatePatients(BaseTestCase):
 
     def test_valid_patients(self):
@@ -292,6 +294,7 @@ class TestValidatePatients(BaseTestCase):
         bad = {"P1": {"name": "A", "age": 131, "city": "X", "insurance": True}}
         with self.assertRaises(ValueError):
             validate_patients(bad)
+
 
 class TestBilling(BaseTestCase):
 
@@ -409,6 +412,7 @@ class TestBilling(BaseTestCase):
     def test_bill_has_no_float_error(self):
         bill = calculate_bill(0.1, 0.2, False, 30)
         self.assertEqual(bill["final_amount"], Decimal("0.30"))
+
 
 class TestCalculateBillKwargs(BaseTestCase):
 
@@ -600,6 +604,7 @@ class TestProcessAppointment(BaseTestCase):
         result = process_appointment(make_appt(status="completed"))
         self.assertEqual(result["status"], "REJECTED")
 
+
 class TestCancelAppointment(BaseTestCase):
 
     def test_cancel_pending(self):
@@ -639,6 +644,7 @@ class TestCancelAppointment(BaseTestCase):
     def test_cancel_blank_id_fails(self):
         ok, _ = cancel_appointment(make_appt(appointment_id="  ", status="pending"))
         self.assertFalse(ok)
+
 
 class TestReports(BaseTestCase):
 
@@ -808,6 +814,7 @@ class TestReports(BaseTestCase):
         dash = generate_clinic_report([], results)
         self.assertEqual(dash["highest_spending_patient"], [])
 
+
 class TestArgsKwargs(BaseTestCase):
 
     def test_combine_bills(self):
@@ -934,6 +941,7 @@ class TestArgsKwargs(BaseTestCase):
         self.assertIsNone(error)
         self.assertEqual(result, Decimal("7500.00"))
 
+
 class TestExtraHardening(BaseTestCase):
 
     def test_is_valid_amount_huge_int_is_false(self):
@@ -999,6 +1007,7 @@ class TestExtraHardening(BaseTestCase):
         self.assertIsNone(error)
         self.assertEqual(result, Decimal("6500.00"))
 
+
 class TestFindDoubleBookings(BaseTestCase):
 
     def test_no_conflict_when_no_time_slots(self):
@@ -1051,6 +1060,45 @@ class TestFindDoubleBookings(BaseTestCase):
         appts = [{**make_appt("D1", doctor_id="D001", status="completed"), "time_slot": 1000}]
         with self.assertRaises(ValueError):
             find_double_bookings(appts)
+
+    def _slot_appt(self, appointment_id, doctor_id, slot, status="completed"):
+        return {"appointment_id": appointment_id, "patient_id": "P001",
+                "doctor_id": doctor_id, "status": status,
+                "time_slot": slot, "tests": []}
+
+    def test_pending_appointment_reserves_its_id(self):
+        appts = [self._slot_appt("K1", "D001", "2026-11-10 10:00", "pending"),
+                 self._slot_appt("K1", "D002", "2026-11-10 12:00", "pending")]
+        results = process_all_appointments(appts)
+        self.assertEqual(results[0]["status"], "PENDING")
+        self.assertEqual(results[1]["status"], "REJECTED")
+        self.assertIn("already processed", results[1]["reason"])
+
+    def test_clash_rejects_only_the_clashing_booking(self):
+        appts = [self._slot_appt("K0", "D001", "2026-11-10 10:00"),
+                 self._slot_appt("K1", "D001", "2026-11-10 10:00"),
+                 self._slot_appt("K2", "D002", "2026-11-10 12:00")]
+        results = process_all_appointments(appts)
+        self.assertEqual([r["status"] for r in results],
+                         ["APPROVED", "REJECTED", "APPROVED"])
+        self.assertEqual(results[1]["reason"], "Doctor is already booked at this time slot")
+        self.assertNotIn("bill", results[1])
+
+    def test_doctor_report_counts_only_approved_completed(self):
+        appts = [self._slot_appt("A", "D001", "2026-11-10 10:00"),
+                 self._slot_appt("B", "D001", "2026-11-10 10:00")]
+        results = process_all_appointments(appts)
+        report, _ = generate_doctor_report("D001", appts, results)
+        assert report is not None
+        self.assertEqual(report["completed"], 1)
+
+    def test_clinic_report_counts_only_approved_completed(self):
+        appts = [self._slot_appt("A", "D001", "2026-11-10 10:00"),
+                 self._slot_appt("B", "D001", "2026-11-10 10:00")]
+        results = process_all_appointments(appts)
+        report = generate_clinic_report(appts, results)
+        self.assertEqual(report["completed"], 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

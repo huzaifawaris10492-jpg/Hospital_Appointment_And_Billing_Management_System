@@ -3,7 +3,7 @@ import math
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime
 
-
+TIME_SLOT_FORMAT = "%Y-%m-%d %H:%M"
 MAX_AGE = 130
 MAX_AMOUNT = 10**12
 CENT = Decimal("0.01")
@@ -45,20 +45,27 @@ test_prices = {
     "MRI": 8000
 }
 
+
 def normalize_id(value):
     return value.strip().upper() if isinstance(value, str) else value
+
 
 def normalize_status(value):
     return value.strip().lower() if isinstance(value, str) else value
 
-def normalize_time_slot(value):
-    """Return a time slot as 'YYYY-MM-DD HH:MM'. Raises ValueError if it is not valid."""
-    if not isinstance(value, str):
-        raise ValueError(f"time_slot must be a string, not {value!r}")
+
+def normalize_time_slot(time_slot):
+    if not isinstance(time_slot, str):
+        raise ValueError("time_slot must be a string")
+    cleaned = " ".join(time_slot.strip().replace("T", " ").split())
+
     try:
-        return datetime.fromisoformat(value.strip()).strftime("%Y-%m-%d %H:%M")
+        parsed = datetime.strptime(cleaned, TIME_SLOT_FORMAT)
     except ValueError:
-        raise ValueError(f"Invalid time_slot {value!r} (expected YYYY-MM-DD HH:MM)")
+        raise ValueError("time_slot must use the format YYYY-MM-DD HH:MM")
+
+    return parsed.strftime(TIME_SLOT_FORMAT)
+
 
 def find_double_bookings(appointments):
     """Return (doctor_id, time_slot, [appointment_ids]) for each slot with more than one active appointment."""
@@ -75,6 +82,7 @@ def find_double_bookings(appointments):
         key = (normalize_id(a.get("doctor_id")), normalize_time_slot(a["time_slot"]))
         slots.setdefault(key, []).append(normalize_id(a.get("appointment_id")))
     return [(doctor_id, slot, ids) for (doctor_id, slot), ids in slots.items() if len(ids) > 1]
+
 
 def validate_appointment(appointment, patients=patients, doctors=doctors, test_prices=test_prices):
     if not isinstance(appointment, dict):
@@ -142,12 +150,14 @@ def validate_appointment(appointment, patients=patients, doctors=doctors, test_p
 
     return True, "Valid"
 
+
 def is_valid_age(age):
     if isinstance(age, bool):
         return False
     if not isinstance(age, (int, float, Decimal)) or not math.isfinite(age):
         return False
     return 0 <= age <= MAX_AGE and age == int(age)
+
 
 def validate_doctors(doctors):
     if not isinstance(doctors, dict):
@@ -167,6 +177,7 @@ def validate_doctors(doctors):
             raise ValueError(f"{doctor_id}: invalid fee")
         if not isinstance(doctor.get("available"), bool):
             raise ValueError(f"{doctor_id}: available must be a bool")
+
 
 def validate_patients(patients):
     if not isinstance(patients, dict):
@@ -189,6 +200,7 @@ def validate_patients(patients):
         if not isinstance(patient.get("insurance"), bool):
             raise ValueError(f"{patient_id}: insurance must be a bool")
 
+
 def validate_test_prices(test_prices):
     if not isinstance(test_prices, dict):
         raise ValueError("test_prices must be a dict")
@@ -201,13 +213,16 @@ def validate_test_prices(test_prices):
     if len(normalized_names) != len(set(normalized_names)):
         raise ValueError(f"Duplicate test name(s) after normalization: {test_prices}")
 
+
 def to_money(value):
     """Convert a number to Decimal (via str, so 0.1 stays exactly 0.1)."""
     return Decimal(str(value))
 
+
 def round_money(value):
     """Round a Decimal to 2 decimal places (half up, like a normal bill)."""
     return value.quantize(CENT, rounding=ROUND_HALF_UP)
+
 
 def is_valid_amount(value):
     """True for a real, finite number from 0 to MAX_AMOUNT (bool is not accepted)."""
@@ -218,6 +233,7 @@ def is_valid_amount(value):
     except OverflowError:
         return False
 
+
 def validate_clinic_config(config):
     if not isinstance(config, dict):
         raise ValueError("clinic config must be a dict")
@@ -227,6 +243,7 @@ def validate_clinic_config(config):
             raise ValueError(f"CLINIC_CONFIG[{key!r}] must be a number between 0 and 1")
     if not is_valid_age(config.get("senior_age_threshold")):
         raise ValueError(f"CLINIC_CONFIG['senior_age_threshold'] must be a whole number between 0 and {MAX_AGE}")
+
 
 def calculate_test_charges(tests, test_prices=test_prices):
     if not isinstance(tests, list):
@@ -251,6 +268,7 @@ def calculate_test_charges(tests, test_prices=test_prices):
         total += to_money(price)
     return total
 
+
 def calculate_insurance_coverage(consultation_fee, test_charges, has_insurance, config=CLINIC_CONFIG):
     if not is_valid_amount(consultation_fee):
         raise ValueError(f"Invalid consultation fee: {consultation_fee!r}")
@@ -264,6 +282,7 @@ def calculate_insurance_coverage(consultation_fee, test_charges, has_insurance, 
     consultation_coverage = to_money(consultation_fee) * to_money(config["insurance_consultation_rate"])
     test_coverage = to_money(test_charges) * to_money(config["insurance_test_rate"])
     return round_money(consultation_coverage), round_money(test_coverage)
+
 
 def calculate_bill(consultation_fee, test_charges, has_insurance, age, config=CLINIC_CONFIG):
     if not is_valid_amount(consultation_fee):
@@ -301,6 +320,7 @@ def calculate_bill(consultation_fee, test_charges, has_insurance, age, config=CL
         "final_amount": final_amount
     }
 
+
 def validate_report_inputs(appointments, processed_results):
     if not isinstance(appointments, (list, tuple)):
         raise ValueError("appointments must be a list")
@@ -327,6 +347,7 @@ def validate_report_inputs(appointments, processed_results):
                     raise ValueError(f"bill is missing '{key}'")
                 if not is_valid_amount(bill[key]):
                     raise ValueError(f"bill has an invalid '{key}'")
+
 
 def process_appointment(appointment, processed_appointment_ids=None,
                         patients=patients, doctors=doctors, test_prices=test_prices, config=CLINIC_CONFIG):
@@ -369,6 +390,7 @@ def process_appointment(appointment, processed_appointment_ids=None,
                 "patient_id": patient_id, "doctor_id": doctor_id}
 
     if status == "pending":
+        processed_appointment_ids.add(appointment_id)
         return {"appointment_id": appointment_id, "status": "PENDING",
                 "reason": "Pending appointments cannot be billed until completed",
                 "patient_id": patient_id, "doctor_id": doctor_id}
@@ -401,6 +423,7 @@ def process_appointment(appointment, processed_appointment_ids=None,
     "bill": bill
 }
 
+
 def cancel_appointment(appointment):
     if not isinstance(appointment, dict):
         return False, "Cannot cancel: appointment must be a dictionary"
@@ -422,26 +445,26 @@ def cancel_appointment(appointment):
 
     return False, f"Invalid status: {status}"
 
+
 def process_all_appointments(appointments, patients=patients, doctors=doctors, test_prices=test_prices, config=CLINIC_CONFIG):
     if not isinstance(appointments, (list, tuple)):
         raise ValueError("appointments must be a list")
     processed_ids = set()
+    booked_slots = set()
     results = []
-    bookable = []
     for a in appointments:
         result = process_appointment(a, processed_ids, patients, doctors, test_prices, config)
+        if result["status"] != "REJECTED" and a.get("time_slot") is not None:
+            slot_key = (result["doctor_id"], normalize_time_slot(a["time_slot"]))
+            if slot_key in booked_slots:
+                result["status"] = "REJECTED"
+                result["reason"] = "Doctor is already booked at this time slot"
+                result.pop("bill", None)
+            else:
+                booked_slots.add(slot_key)
         results.append(result)
-        if result["status"] != "REJECTED":
-            bookable.append(a)
-    later_ids = set()
-    for _, slot, ids in find_double_bookings(bookable):
-        later_ids.update(ids[1:])
-    for result in results:
-        if result["status"] != "REJECTED" and result["appointment_id"] in later_ids:
-            result["status"] = "REJECTED"
-            result["reason"] = "Doctor is already booked at this time slot"
-            result.pop("bill", None)
     return results
+
 
 def generate_doctor_report(doctor_id, appointments, processed_results, doctors=doctors):
     validate_report_inputs(appointments, processed_results)
@@ -452,12 +475,12 @@ def generate_doctor_report(doctor_id, appointments, processed_results, doctors=d
 
     doctor_appointments = [a for a in appointments if normalize_id(a["doctor_id"]) == doctor_id]
     total = len(doctor_appointments)
-    completed = len([a for a in doctor_appointments if normalize_status(a["status"]) == "completed"])
     cancelled = len([a for a in doctor_appointments if normalize_status(a["status"]) == "cancelled"])
     pending = len([a for a in doctor_appointments if normalize_status(a["status"]) == "pending"])
 
     doctor_results = [r for r in processed_results if r["doctor_id"] == doctor_id]
     bills = [r["bill"]["final_amount"] for r in doctor_results if r["status"] == "APPROVED"]
+    completed = len(bills)
 
     revenue = sum(bills, Decimal("0.00"))
     average_bill = round_money(revenue / len(bills)) if bills else Decimal("0.00")
@@ -474,6 +497,7 @@ def generate_doctor_report(doctor_id, appointments, processed_results, doctors=d
         "revenue": revenue,
         "average_bill" : average_bill,
     }, "OK"
+
 
 def generate_patient_report(patient_id, appointments, processed_results, patients=patients):
     validate_report_inputs(appointments, processed_results)
@@ -504,10 +528,11 @@ def generate_patient_report(patient_id, appointments, processed_results, patient
         "total_saved": total_saved
     }, "OK"
 
+
 def generate_clinic_report(appointments, processed_results, patients=patients, doctors=doctors, config=CLINIC_CONFIG):
     validate_report_inputs(appointments, processed_results)
     total_appointments = len(appointments)
-    completed = [a for a in appointments if normalize_status(a["status"]) == "completed"]
+    completed = [r for r in processed_results if r["status"] == "APPROVED"]
     cancelled = [a for a in appointments if normalize_status(a["status"]) == "cancelled"]
     pending = [a for a in appointments if normalize_status(a["status"]) == "pending"]
 
@@ -572,11 +597,13 @@ def generate_clinic_report(appointments, processed_results, patients=patients, d
         "patients_no_completed_appointment": no_completed
     }
 
+
 def combine_bills(*bills):
     for bill in bills:
         if not is_valid_amount(bill):
             raise ValueError(f"Invalid bill amount: {bill!r}")
     return sum((to_money(bill) for bill in bills), Decimal("0"))
+
 
 def search_patients(patients_data=None, **criteria):
     if patients_data is None:
@@ -591,6 +618,7 @@ def search_patients(patients_data=None, **criteria):
         if match:
             results.append(pid)
     return results
+
 
 def calculate_bill_kwargs(consultation_fee, **options):
     allowed_keys = {"insurance", "senior_discount", "age", "tests", "include_tests", "config", "test_prices"}
@@ -642,6 +670,7 @@ def calculate_bill_kwargs(consultation_fee, **options):
     except ValueError as e:
         return None, str(e)
     return bill["final_amount"], None
+
 
 def main():
     appts = copy.deepcopy(appointments)
@@ -716,6 +745,7 @@ def main():
             print(f"Conflict: doctor {doctor_id} double-booked at {slot} ({', '.join(ids)})")
     else:
         print("No conflicts found")
+
 
 if __name__ == "__main__":
     main()
