@@ -57,12 +57,12 @@ def normalize_status(value):
 def normalize_time_slot(time_slot):
     if not isinstance(time_slot, str):
         raise ValueError("time_slot must be a string")
-    cleaned = " ".join(time_slot.strip().replace("T", " ").split())
+    cleaned = " ".join(time_slot.strip().replace("T", " ", 1).split())
 
     try:
         parsed = datetime.strptime(cleaned, TIME_SLOT_FORMAT)
     except ValueError:
-        raise ValueError("time_slot must use the format YYYY-MM-DD HH:MM")
+        raise ValueError(f"time_slot must use the format YYYY-MM-DD HH:MM, got {time_slot!r}")
 
     return parsed.strftime(TIME_SLOT_FORMAT)
 
@@ -460,6 +460,7 @@ def process_all_appointments(appointments, patients=patients, doctors=doctors, t
                 result["status"] = "REJECTED"
                 result["reason"] = "Doctor is already booked at this time slot"
                 result.pop("bill", None)
+                processed_ids.discard(result["appointment_id"])
             else:
                 booked_slots.add(slot_key)
         results.append(result)
